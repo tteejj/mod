@@ -1,0 +1,540 @@
+# main.ps1
+# (Based on main-ps1.txt, updated for modularization and new features)
+
+# Unified Productivity Suite v5.0 - Main Entry Point
+# PowerShell 7.2+ Recommended for PSStyle, 5.1+ Core Functionality
+
+#region Module Loading
+
+# Get script directory
+$script:ModuleRoot = $PSScriptRoot
+
+# Dot source modules in dependency order
+. "$script:ModuleRoot\helper.ps1" # Load helper first for Save/Load data and other utils
+. "$script:ModuleRoot\theme.ps1"
+. "$script:ModuleRoot\ui.ps1" # Depends on theme
+. "$script:ModuleRoot\core-data.ps1" # Data structures, project/task/snippet logic
+. "$script:ModuleRoot\core-time.ps1" # Time tracking, time reports
+
+# Initialize systems
+# Data model is initialized within core-data.ps1 itself when it's sourced.
+Load-UnifiedData # From helper.ps1 - populates $script:Data
+Initialize-ThemeSystem # From theme.ps1 - uses $script:Data.Settings.Theme
+
+#endregion
+
+#region Quick Action System (Requirement H)
+
+# Quick action map for +key shortcuts
+# Actions now call functions from their respective modules
+$script:QuickActionMap = @{
+    # Time actions
+    '9' = { Add-ManualTimeEntry; return $true } # core-time.ps1
+    'm' = { Add-ManualTimeEntry; return $true } # core-time.ps1
+    'time' = { Add-ManualTimeEntry; return $true } # core-time.ps1
+    's' = { Start-Timer; return $true }         # core-time.ps1
+    'timer' = { Start-Timer; return $true }     # core-time.ps1
+    'stop' = { Stop-Timer; return $true }       # core-time.ps1
+    
+    # Task actions
+    'a' = { Add-TodoTask; return $true }        # core-data.ps1
+    'task' = { Add-TodoTask; return $true }     # core-data.ps1
+    'qa' = {                                    # core-data.ps1
+        $qaInput = Read-Host "Quick add task details"
+        Quick-AddTask -Input $qaInput 
+        return $true
+    }
+    
+    # View actions
+    'v' = {                                     # core-time.ps1 (Show-ActiveTimers) -> ui.ps1
+        Show-ActiveTimers # This function will be in ui.ps1, using data from core-time
+        Write-Host "`nPress any key to continue..."
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        return $true
+    }
+    't' = { Show-TaskManagementMenu; return $true } # main.ps1 (orchestrates task views from ui.ps1)
+    'today' = { Show-TodayView; return $true } # ui.ps1
+    'w' = {                                     # main.ps1 (orchestrates report from core-time.ps1 and ui.ps1)
+        Display-WeekReport # New wrapper in main.ps1
+        Write-Host "`nPress Enter to continue..."
+        Read-Host
+        return $true
+    }
+    'week' = $script:QuickActionMap['w'] # Alias
+    
+    # Project actions
+    'p' = {                                     # core-data.ps1 (Show-ProjectDetail data) -> ui.ps1
+        Show-ProjectDetail # This function will be in ui.ps1, using data from core-data
+        Write-Host "`nPress Enter to continue..."
+        Read-Host
+        return $true
+    }
+    'projects' = { Show-ProjectsMenu; return $true } # main.ps1
+    
+    # Command snippets (Requirement D related)
+    'c' = { Manage-CommandSnippets; return $true }  # core-data.ps1
+    'cmd' = $script:QuickActionMap['c'] # Alias
+    'snippets' = $script:QuickActionMap['c'] # Alias
+    
+    # Reports
+    'r' = { Show-ReportsMenu; return $true }       # main.ps1
+    'export' = { Export-FormattedTimesheet; return $true } # core-time.ps1 (Requirement I)
+    'timesheet' = $script:QuickActionMap['export'] # Alias
+    
+    # Calendar
+    'cal' = { Show-Calendar; return $true } # ui.ps1
+
+    # Help
+    'h' = { Show-Help; return $true }           # ui.ps1
+    'help' = $script:QuickActionMap['h'] # Alias
+    '?' = { Show-QuickActionHelp; return $true }# main.ps1
+}
+
+function Process-QuickAction { # From main-ps1.txt
+    param([string]$Key)
+    $actionKey = $Key.ToLower()
+    $action = $script:QuickActionMap[$actionKey]
+    if ($action) {
+        return & $action
+    }
+    $matches = $script:QuickActionMap.Keys | Where-Object { $_.StartsWith($actionKey) }
+    if ($matches.Count -eq 1) {
+        $action = $script:QuickActionMap[$matches[0]]
+        return & $action
+    } elseif ($matches.Count -gt 1) {
+        Write-Warning "Ambiguous quick action '+$($Key)'. Matches: $($matches -join ', ')"
+        return $true # Indicate action was handled (by showing warning)
+    }
+    return $false # No action found
+}
+
+function Show-QuickActionHelp { # From main-ps1.txt, updated for new actions
+    Write-Header "Quick Actions Help (+Key)" # ui.ps1
+    Write-Host "Use +key from any prompt to trigger quick actions:" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    # Content matches Show-Help from ui.ps1 for consistency
+    Show-Help # ui.ps1's Show-Help already has a good quick actions list
+}
+
+#endregion
+
+#region Menu Structure & Handling
+
+$script:MenuStructure = @{
+    "1" = @{Label="Time Management"; Action={ Show-TimeManagementMenu }}
+    "2" = @{Label="Task Management"; Action={ Show-TaskManagementMenu }}
+    "3" = @{Label="Reports & Analytics"; Action={ Show-ReportsMenu }}
+    "4" = @{Label="Projects & Clients"; Action={ Show-ProjectsMenu }}
+    "5" = @{Label="Tools & Utilities"; Action={ Show-ToolsMenu }}
+    "6" = @{Label="Settings & Config"; Action={ Show-SettingsMenu }}
+}
+
+function Show-GenericMenu {
+    param(
+        [string]$MenuTitle,
+        [ordered]@{Key=[string];Label=[string];Action=[scriptblock]} $MenuOptions, # Ordered hashtable for predictable display
+        [switch]$ShowBackButton = $true
+    )
+    while ($true) {
+        Write-Header $MenuTitle # ui.ps1
+        foreach ($key in $MenuOptions.Keys) {
+            Write-Host "  [$key] $($MenuOptions[$key].Label)"
+        }
+        if ($ShowBackButton) { Write-Host "`n  [B] Back" }
+        
+        $choice = Read-Host "`nChoice"
+        if ($ShowBackButton -and $choice.ToUpper() -eq 'B') { return }
+
+        if ($MenuOptions.ContainsKey($choice.ToUpper())) {
+            Clear-Host # Clear before executing action for cleaner screen
+            & $MenuOptions[$choice.ToUpper()].Action
+            if ($ShowBackButton) { # Only pause if not returning immediately (like 'B')
+                Write-Host "`nPress Enter to return to '$MenuTitle' menu..." ; Read-Host | Out-Null
+            }
+        } elseif (-not [string]::IsNullOrWhiteSpace($choice)) {
+            Write-Warning "Invalid choice." ; Start-Sleep -Seconds 1
+        }
+    }
+}
+
+function Show-TimeManagementMenu {
+    $options = [ordered]@{
+        "1" = @{Label="Manual Time Entry (Preferred)"; Action={ Add-ManualTimeEntry }} # core-time.ps1
+        "2" = @{Label="Start Timer"; Action={ Start-Timer }} # core-time.ps1
+        "3" = @{Label="Stop Timer"; Action={ Stop-Timer }} # core-time.ps1
+        "4" = @{Label="View Active Timers"; Action={ Show-ActiveTimers }} # ui.ps1 (uses core-time data)
+        "5" = @{Label="Quick Time Entry (PROJECT HR [DESC])"; Action={ $input = Read-Host "Entry"; Quick-TimeEntry $input }} # core-time.ps1
+        "6" = @{Label="Edit Time Entry"; Action={ Edit-TimeEntry }} # core-time.ps1
+        "7" = @{Label="Delete Time Entry"; Action={ Delete-TimeEntry }} # core-time.ps1
+        "8" = @{Label="Today's Time Log"; Action={ Display-TodayTimeLog }} # main.ps1 (UI wrapper)
+        "9" = @{Label="Export Formatted Timesheet"; Action={ Export-FormattedTimesheet }} # core-time.ps1
+    }
+    Show-GenericMenu -MenuTitle "Time Management" -MenuOptions $options
+}
+
+function Show-TaskManagementMenu { # Adapted from Pmc Mod Base
+    $filter = ""; $sortBy = "Smart"; $showCompleted = $false; $viewMode = "Default"
+    while ($true) {
+        Clear-Host; Write-Header "Task Management" # ui.ps1
+        Show-TasksView -Filter $filter -SortBy $sortBy -ShowCompleted:$showCompleted -View $viewMode # ui.ps1
+        
+        $statusLine = "Filter: $(if ($filter){"'$filter'"}else{"None"}) | Sort: $sortBy | View: $viewMode | Showing: $(if($showCompleted){'All'}else{'Active'})"
+        Write-Host "`n$statusLine" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+        Write-Host "Commands: [A]dd, [C]omplete, [E]dit, [D]elete, [P]rogress, [ST]Subtasks"
+        Write-Host "Display:  [F]ilter, [S]ort, [V]iewMode, [T]oggleCompleted"
+        Write-Host "Archive:  View A[R]chive, [AR]chive Old Tasks"
+        Write-Host "Shortcuts: 'c <id>', 'e <id>', 'd <id>', 'p <id>'"
+        Write-Host "[B]ack"
+        $choice = Read-Host "`nTask Command"
+
+        if ($choice -match '^([cdepst])\s+(.+)$' -and $Matches[1].ToLower() -ne 's') { # 's' is for Sort command
+            $cmd = $Matches[1].ToLower(); $id = $Matches[2]
+            switch ($cmd) {
+                "c" { Complete-Task -TaskId $id } # core-data
+                "d" { Remove-Task -TaskId $id }   # core-data
+                "e" { Edit-Task -TaskId $id }     # core-data
+                "p" { Update-TaskProgress -TaskId $id } # core-data
+                "st" { Manage-Subtasks -TaskId $id } # core-data
+            }
+            continue # Loop back after action
+        }
+        switch ($choice.ToLower()) {
+            "a"  { Add-TodoTask } # core-data
+            "c"  { $id = Read-Host "ID to complete"; Complete-Task -TaskId $id }
+            "e"  { $id = Read-Host "ID to edit"; Edit-Task -TaskId $id }
+            "d"  { $id = Read-Host "ID to delete"; Remove-Task -TaskId $id }
+            "p"  { $id = Read-Host "ID to update progress"; Update-TaskProgress -TaskId $id }
+            "st" { $id = Read-Host "ID to manage subtasks"; Manage-Subtasks -TaskId $id }
+            "f"  { $filter = Read-Host "Filter text (blank for none)" }
+            "s"  { $sortBy = (Show-MenuSelection -Title "Sort By" -Options @("Smart","Priority","DueDate","Created","Category","Project") -Prompt "Sort choice"); if(-not $sortBy){$sortBy="Smart"} }
+            "v"  { $viewMode = (Show-MenuSelection -Title "View Mode" -Options @("Default","Kanban","Timeline","Project") -Prompt "View choice"); if(-not $viewMode){$viewMode="Default"} }
+            "t"  { $showCompleted = -not $showCompleted; Write-Info "Show completed toggled to $showCompleted" }
+            "r"  { View-TaskArchive } # core-data (placeholder) -> ui.ps1 to display
+            "ar" { Archive-CompletedTasks } # core-data
+            "b"  { return }
+            default { if($choice){Write-Warning "Unknown task command." ; Start-Sleep 1} }
+        }
+    }
+}
+
+function Show-ReportsMenu {
+    $options = [ordered]@{
+        "1" = @{Label="Week Report (Summary)"; Action={ Display-WeekReport }} # main.ps1 UI wrapper
+        "2" = @{Label="Extended Week Report (Detailed)"; Action={ Display-ExtendedReport }} # main.ps1 UI wrapper
+        "3" = @{Label="Month Summary"; Action={ Display-MonthSummary }} # main.ps1 UI wrapper
+        "4" = @{Label="Project Summary"; Action={ Display-ProjectSummary }} # main.ps1 UI wrapper
+        "5" = @{Label="Task Analytics"; Action={ Display-TaskAnalytics }} # main.ps1 UI wrapper
+        "6" = @{Label="Time Analytics"; Action={ Display-TimeAnalytics }} # main.ps1 UI wrapper
+        "7" = @{Label="Export Formatted Timesheet"; Action={ Export-FormattedTimesheet }} # core-time.ps1
+        "8" = @{Label="Export ALL Data (JSON & CSVs)"; Action={ Export-AllData }} # helper.ps1
+        "9" = @{Label="Change Report Week"; Action={ Change-ReportWeek }} # main.ps1
+    }
+    Show-GenericMenu -MenuTitle "Reports & Analytics" -MenuOptions $options
+}
+
+function Show-ProjectsMenu {
+    $options = [ordered]@{
+        "1" = @{Label="View Projects & Templates"; Action={ Show-ProjectsAndTemplates -Simple:$false }} # ui.ps1
+        "2" = @{Label="Add New Project"; Action={ Add-Project }} # core-data.ps1
+        "3" = @{Label="Edit Project"; Action={ Show-ProjectsAndTemplates -Simple; Edit-Project }} # ui.ps1, core-data.ps1
+        "4" = @{Label="View Project Details"; Action={ Show-ProjectsAndTemplates -Simple; Show-ProjectDetail }} # ui.ps1, core-data.ps1 (for data)
+        "5" = @{Label="Import Project from Excel Form"; Action={ Import-ProjectFromExcel }} # core-data.ps1
+        "6" = @{Label="Batch Import Projects (Future)"; Action={ Batch-ImportProjects }} # core-data.ps1
+        "7" = @{Label="Export Projects to CSV"; Action={ Export-Projects }} # core-data.ps1
+    }
+    Show-GenericMenu -MenuTitle "Projects & Clients" -MenuOptions $options
+}
+
+function Show-ToolsMenu {
+     $options = [ordered]@{
+        "1" = @{Label="Command Snippets"; Action={ Manage-CommandSnippets }} # core-data.ps1
+        "2" = @{Label="Calendar"; Action={ Show-Calendar }} # ui.ps1
+        "3" = @{Label="Excel Copy Jobs"; Action={ Show-ExcelCopyJobsMenu }} # main.ps1
+        "4" = @{Label="Quick Actions Help"; Action={ Show-QuickActionHelp }} # main.ps1
+        "5" = @{Label="Backup Current Data"; Action={ Backup-Data; Write-Info "Backup initiated." }} # helper.ps1
+        "6" = @{Label="Test Excel COM Connection"; Action={ Test-ExcelConnection }} # helper.ps1
+    }
+    Show-GenericMenu -MenuTitle "Tools & Utilities" -MenuOptions $options
+}
+
+function Show-ExcelCopyJobsMenu {
+    $options = [ordered]@{
+        "1" = @{Label="Create New Excel Copy Job"; Action={ New-ExcelCopyJob }} # core-data.ps1
+        "2" = @{Label="Execute Excel Copy Job"; Action={ Execute-ExcelCopyJob }} # core-data.ps1
+        "3" = @{Label="Edit Excel Copy Job (Placeholder)"; Action={ Edit-ExcelCopyJob }} # core-data.ps1
+        "4" = @{Label="Remove Excel Copy Job"; Action={ Remove-ExcelCopyJob }} # core-data.ps1
+    }
+    Show-GenericMenu -MenuTitle "Excel Copy Jobs" -MenuOptions $options
+}
+
+function Show-SettingsMenu {
+    $options = [ordered]@{
+        "1" = @{Label="Time Tracking Settings"; Action={ Edit-TimeTrackingSettings }} # core-time.ps1
+        "2" = @{Label="Task Management Settings"; Action={ Edit-TaskSettings }} # core-data.ps1
+        "3" = @{Label="Command Snippet Settings"; Action={ Edit-CommandSnippetSettings }} # core-data.ps1
+        "4" = @{Label="Excel Form Mapping Config"; Action={ Configure-ExcelForm }} # core-data.ps1
+        "5" = @{Label="Theme Settings (Legacy Console)"; Action={ Edit-ThemeSettings }} # theme.ps1
+        "6" = @{Label="Backup Data"; Action={ Backup-Data }} # helper.ps1
+        "7" = @{Label="Restore from Backup"; Action={ Restore-FromBackup }} # helper.ps1
+        "8" = @{Label="Export ALL Data"; Action={ Export-AllData }} # helper.ps1
+        "9" = @{Label="Import Data (from JSON backup)"; Action={ Import-Data }} # helper.ps1 (needs defining in helper)
+        "R" = @{Label="Reset All Settings to Defaults"; Action={ Reset-ToDefaults }} # helper.ps1 (needs defining in helper)
+    }
+    Show-CurrentSettings # Display current settings overview
+    Show-GenericMenu -MenuTitle "Settings & Configuration" -MenuOptions $options
+}
+
+#endregion
+
+#region Main Loop & UI Wrappers for Reports
+
+function Show-MainMenu { # Adapted from main-ps1.txt
+    while ($true) {
+        Show-Dashboard # ui.ps1
+        Write-Host "`nCommand: " -NoNewline -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+        $inputChoice = Read-Host
+        
+        if ([string]::IsNullOrWhiteSpace($inputChoice)) { continue }
+
+        if ($inputChoice.StartsWith("+")) {
+            if (Process-QuickAction $inputChoice.Substring(1)) { continue }
+            else { Write-Warning "Unknown quick action: $inputChoice. Use +? for help."; Start-Sleep 1; continue }
+        }
+        
+        # Direct dashboard shortcuts
+        $dashboardActions = @{
+            "M" = { Add-ManualTimeEntry }
+            "S" = { Start-Timer }
+            "A" = { Add-TodoTask }
+            "V" = { Show-ActiveTimers; Write-Host "`nPress key..."; $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
+            "T" = { Show-TodayView }
+            "W" = { Display-WeekReport; Write-Host "`nPress key..."; Read-Host | Out-Null }
+            "P" = { Show-ProjectDetail; Write-Host "`nPress key..."; Read-Host | Out-Null }
+            "H" = { Show-Help }
+            "C" = { Manage-CommandSnippets } # Direct shortcut for snippets
+        }
+
+        if ($dashboardActions.ContainsKey($inputChoice.ToUpper())) {
+            & $dashboardActions[$inputChoice.ToUpper()]
+            continue
+        }
+
+        if ($script:MenuStructure.ContainsKey($inputChoice.ToUpper())) {
+            & $script:MenuStructure[$inputChoice.ToUpper()].Action
+        } elseif ($inputChoice.ToUpper() -eq 'Q') {
+            if ($script:Data.ActiveTimers.Count -gt 0) {
+                Write-Warning "You have $($script:Data.ActiveTimers.Count) active timer(s)! Stop all before quitting? (Y/N)"
+                if ((Read-Host).ToUpper() -eq 'Y') { Stop-Timer -TimerKeyToStop 'all' } # core-time.ps1
+            }
+            Save-UnifiedData # helper.ps1
+            Write-Host "`n👋 Thanks for using Unified Productivity Suite! Stay productive! 🚀" -ForegroundColor (Get-ThemeProperty "Palette.AccentFG")
+            return
+        } else {
+            # Fallback for quick entry commands from dashboard not starting with +
+            if ($inputChoice -match '^q\s+(.+)') { Quick-TimeEntry $inputChoice.Substring(2).Trim() } # core-time
+            elseif ($inputChoice -match '^qa\s+(.+)') { Quick-AddTask -Input $inputChoice.Substring(3).Trim() } # core-data
+            else { Write-Warning "Unknown command. Use numbers for menu, +key for quick actions, or [H] for help."; Start-Sleep 1 }
+        }
+    }
+}
+
+# UI Wrappers for Reports (call data functions from core-time, display using ui.ps1)
+function Display-WeekReport {
+    Write-Header "Week Report"
+    $reportData = Get-WeekReportData # core-time.ps1
+    if (-not $reportData) { Write-Info "No data for this week."; return }
+    
+    $columns = @(
+        @{Name="Name"; Title="Project"; Width=25; Wrap=$true},
+        @{Name="Id1"; Title="ID1"; Width=10},
+        @{Name="Id2"; Title="ID2"; Width=10},
+        @{Name="Mon"; Title="Mon"; Width=6; Align="Right"},
+        @{Name="Tue"; Title="Tue"; Width=6; Align="Right"},
+        @{Name="Wed"; Title="Wed"; Width=6; Align="Right"},
+        @{Name="Thu"; Title="Thu"; Width=6; Align="Right"},
+        @{Name="Fri"; Title="Fri"; Width=6; Align="Right"},
+        @{Name="Total"; Title="Total"; Width=7; Align="Right"},
+        @{Name="Value"; Title="Value ($)"; Width=10; Align="Right"}
+    )
+    Format-TableUnicode -Data $reportData -Columns $columns -Title "Week of $(($script:Data.CurrentWeek).ToString('yyyy-MM-dd'))"
+    # Overall totals
+    $grandTotal = ($reportData | Measure-Object -Property Total -Sum).Sum
+    $grandValue = ($reportData | Measure-Object -Property Value -Sum).Sum
+    Write-Host "Overall Total Hours: $([Math]::Round($grandTotal,2))" -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG")
+    Write-Host "Overall Billable Value: $($(Get-ThemeProperty "Palette.CurrencySymbol"))$([Math]::Round($grandValue,2))" -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG")
+}
+
+function Display-ExtendedReport {
+    Write-Header "Extended Week Report"
+    $entries = Get-ExtendedReportData # core-time.ps1
+    if ($entries.Count -eq 0) { Write-Info "No entries for this week."; return }
+    
+    # Group by date for display
+    $groupedByDate = $entries | Group-Object Date | Sort-Object Name
+    foreach ($dateGroup in $groupedByDate) {
+        $date = [datetime]::Parse($dateGroup.Name)
+        Write-Host "`n📅 $($date.ToString('dddd, MMM dd yyyy'))" -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+        $dayData = $dateGroup.Group | ForEach-Object {
+            $project = Get-ProjectOrTemplate $_.ProjectKey
+            $taskDesc = if ($_.TaskId) { ($script:Data.Tasks | Where-Object Id -eq $_.TaskId).Description } else { $_.Description }
+            [PSCustomObject]@{
+                Time = if ($_.StartTime -and $_.EndTime) { "$($_.StartTime)-$($_.EndTime)" } else { "[Manual]" }
+                Hours = "$($_.Hours)h"
+                Project = $project.Name
+                Details = $taskDesc
+            }
+        }
+        Format-TableUnicode -Data $dayData -NoHeader -BorderStyle "Rounded" -Columns @(
+            @{Name="Time"; Width=12}, @{Name="Hours"; Width=7; Align="Right"},
+            @{Name="Project"; Width=20}, @{Name="Details"; Width=35; Wrap=$true}
+        )
+    }
+}
+
+function Display-TodayTimeLog {
+    Write-Header "Today's Time Log"
+    $entries = Get-TodayTimeLogData # core-time.ps1
+    if ($entries.Count -eq 0) { Write-Info "No time logged today yet."; return }
+    # Display logic similar to Display-ExtendedReport for one day
+    $todayData = $entries | ForEach-Object {
+        $project = Get-ProjectOrTemplate $_.ProjectKey
+        $taskDesc = if ($_.TaskId) { ($script:Data.Tasks | Where-Object Id -eq $_.TaskId).Description } else { $_.Description }
+        [PSCustomObject]@{
+            Time = if ($_.StartTime -and $_.EndTime) { "$($_.StartTime)-$($_.EndTime)" } else { "[Manual]" }
+            Hours = "$($_.Hours)h"
+            Project = $project.Name
+            Details = $taskDesc
+        }
+    }
+    Format-TableUnicode -Data $todayData -Title "Entries for $((Get-Date).ToString('MMM dd, yyyy'))" -Columns @(
+        @{Name="Time"; Width=12}, @{Name="Hours"; Width=7; Align="Right"},
+        @{Name="Project"; Width=25}, @{Name="Details"; Width=40; Wrap=$true}
+    )
+    $totalHours = ($entries | Measure-Object Hours -Sum).Sum
+    Write-Host "Total Hours Today: $([Math]::Round($totalHours,2))" -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG")
+}
+
+function Display-MonthSummary {
+    Write-Header "Month Summary for $((Get-Date $script:Data.CurrentWeek).ToString('MMMM yyyy'))"
+    $monthEntries = Get-MonthSummaryData -MonthDate $script:Data.CurrentWeek # core-time
+    if ($monthEntries.Count -eq 0) { Write-Info "No entries for this month."; return }
+
+    $byProject = $monthEntries | Group-Object ProjectKey | ForEach-Object {
+        $project = Get-ProjectOrTemplate $_.Name
+        $hours = ($_.Group | Measure-Object -Property Hours -Sum).Sum
+        [PSCustomObject]@{
+            Project = $project.Name
+            Client = $project.Client
+            Hours = [Math]::Round($hours, 2)
+            Value = if ($project.BillingType -eq "Billable") { [Math]::Round($hours * $project.Rate, 2) } else { 0 }
+        }
+    } | Sort-Object Hours -Descending
+    
+    Format-TableUnicode -Data $byProject -Columns @(
+        @{Name="Project"; Width=30}, @{Name="Client"; Width=20},
+        @{Name="Hours"; Width=10; Align="Right"}, @{Name="Value"; Title="Value ($)"; Width=12; Align="Right"}
+    )
+    $totalHours = ($byProject | Measure-Object Hours -Sum).Sum
+    $totalValue = ($byProject | Measure-Object Value -Sum).Sum
+    Write-Host "Month Total Hours: $([Math]::Round($totalHours,2))" -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG")
+    Write-Host "Month Billable Value: $($(Get-ThemeProperty "Palette.CurrencySymbol"))$([Math]::Round($totalValue,2))" -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG")
+}
+
+function Display-ProjectSummary {
+    Write-Header "All Projects Summary"
+    $projects = Get-ProjectSummaryData # core-time.ps1 (gets projects with updated stats)
+    if ($projects.Count -eq 0) { Write-Info "No projects found."; return }
+    $summaryData = $projects | ForEach-Object {
+        Update-ProjectStatistics -ProjectKey $_.Key # Ensure stats are fresh
+        [PSCustomObject]@{
+            Key = $_.Key; Name = $_.Name; Status = $_.Status; Client = $_.Client
+            TotalHours = $_.TotalHours; Budget = $_.Budget
+            BudgetUsed = if ($_.Budget -gt 0) { [Math]::Round(($_.TotalHours / $_.Budget)*100,0).ToString() + "%" } else {"N/A"}
+            ActiveTasks = $_.ActiveTasks; CompletedTasks = $_.CompletedTasks
+        }
+    } | Sort-Object Status, Name
+    Format-TableUnicode -Data $summaryData -Columns @(
+        @{Name="Key"; Width=10}, @{Name="Name"; Width=25}, @{Name="Status"; Width=10}, @{Name="Client"; Width=15},
+        @{Name="TotalHours";Title="Hours"; Width=7;Align="Right"}, @{Name="BudgetUsed";Title="Budget%";Width=10;Align="Right"},
+        @{Name="ActiveTasks";Title="ActiveT";Width=8;Align="Right"}
+    )
+}
+
+function Display-TaskAnalytics {
+    Write-Header "Task Analytics"
+    # This would call data aggregation functions from core-data.ps1 if complex,
+    # or perform simple aggregations here for display.
+    # Example:
+    $allTasks = $script:Data.Tasks | Where-Object { $_.IsCommand -ne $true }
+    if ($allTasks.Count -eq 0) { Write-Info "No tasks to analyze."; return }
+    # ... (detailed analytics like in Pmc Mod Base's Show-TaskAnalytics)
+    Write-Warning "Task Analytics display is simplified. Full stats in Pmc Mod Base."
+    Show-TaskStatistics $allTasks # ui.ps1 (provides a good summary)
+}
+
+function Display-TimeAnalytics {
+    Write-Header "Time Analytics"
+    $analyticsData = Get-TimeAnalyticsData # core-time.ps1
+    # ... (display logic for stats by day of week, top projects, etc.) ...
+    Write-Warning "Time Analytics display is simplified. Full stats in Pmc Mod Base."
+    Write-Host "Total hours in last 30 days: $(($analyticsData.Last30DaysEntries | Measure-Object Hours -Sum).Sum)"
+}
+
+function Change-ReportWeek { # From main-ps1.txt
+    Write-Host "[P]revious, [N]ext, [T]oday's week, or enter date (YYYY-MM-DD): " -NoNewline
+    $nav = Read-Host
+    $currentReportWeek = Get-WeekStart $script:Data.CurrentWeek # Ensure it's always a Monday
+
+    switch ($nav.ToUpper()) {
+        'P' { $script:Data.CurrentWeek = $currentReportWeek.AddDays(-7) }
+        'N' { $script:Data.CurrentWeek = $currentReportWeek.AddDays(7) }
+        'T' { $script:Data.CurrentWeek = Get-WeekStart (Get-Date) } # helper.ps1
+        default {
+            try { $script:Data.CurrentWeek = Get-WeekStart ([DateTime]::Parse($nav)) }
+            catch { Write-Error "Invalid date format. Report week unchanged."; return }
+        }
+    }
+    Save-UnifiedData # helper.ps1
+    Write-Success "Report week changed to start: $($script:Data.CurrentWeek.ToString('yyyy-MM-dd'))"
+}
+
+function Show-CurrentSettings { # From main-ps1.txt, shows overview before settings menu
+    Write-Header "Current Settings Overview"
+    $s = $script:Data.Settings
+    $cs = $s.CommandSnippets
+    $theme = $s.Theme
+    $data = @(
+        [PSCustomObject]@{Setting="Default Rate"; Value="$($s.DefaultRate)/hr ($($s.Currency))"}
+        [PSCustomObject]@{Setting="Work Schedule"; Value="$($s.HoursPerDay) hrs/day, $($s.DaysPerWeek) days/wk"}
+        [PSCustomObject]@{Setting="Task Default Priority"; Value=$s.DefaultPriority}
+        [PSCustomObject]@{Setting="Task Default Category"; Value=$s.DefaultCategory}
+        [PSCustomObject]@{Setting="Show Completed Tasks (days)"; Value=$s.ShowCompletedDays}
+        [PSCustomObject]@{Setting="Auto-Archive Tasks (days)"; Value=$s.AutoArchiveDays}
+        [PSCustomObject]@{Setting="Snippet Hotkeys Enabled"; Value=$cs.EnableHotkeys}
+        [PSCustomObject]@{Setting="Snippet Auto-Copy"; Value=$cs.AutoCopyToClipboard}
+        [PSCustomObject]@{Setting="Theme Header Color"; Value="$($theme.Header) (Legacy)"}
+    )
+    Format-TableUnicode -Data $data -NoHeader -BorderStyle "None" -Columns @(
+        @{Name="Setting";Width=35}, @{Name="Value";Width=35}
+    )
+}
+
+#endregion
+
+#region Entry Point
+
+function Start-UnifiedProductivitySuite {
+    Write-Host "Unified Productivity Suite v5.0" -ForegroundColor (Get-ThemeProperty "Palette.AccentFG")
+    Write-Host "Initializing..." -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    
+    if (-not $script:Data.Settings.QuickActionTipShown) {
+        Write-Host "`n✨ TIP: Use +key shortcuts (e.g., +a, +time, +?) for quick access!" -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+        $script:Data.Settings.QuickActionTipShown = $true
+        Save-UnifiedData
+        Start-Sleep -Seconds 2
+    }
+    
+    Show-MainMenu
+}
+
+Start-UnifiedProductivitySuite
+#endregion

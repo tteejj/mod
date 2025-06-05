@@ -1,0 +1,3235 @@
+# Core Data Management Module
+# Projects, tasks, todos, and command snippets
+
+#region Data Model Initialization
+
+# Initialize the unified data model
+$script:Data = @{
+    Projects = @{}      # Master project repository with full TimeTracker template support
+    Tasks = @()         # Full TodoTracker task model with subtasks
+    TimeEntries = @()   # All time entries with manual and timer support
+    ActiveTimers = @{}  # Currently running timers
+    ArchivedTasks = @() # TodoTracker archive
+    ExcelCopyJobs = @{} # Saved Excel copy configurations
+    CurrentWeek = Get-Date -Hour 0 -Minute 0 -Second 0
+    Settings = Get-DefaultSettings
+}
+
+function Get-DefaultSettings {
+    return @{
+        # Time Tracker Settings
+        DefaultRate = 100
+        Currency = "USD"
+        HoursPerDay = 8
+        DaysPerWeek = 5
+        TimeTrackerTemplates = @{
+            "ADMIN" = @{
+                Id1 = "100"
+                Id2 = "ADM"
+                Name = "Administrative Tasks"
+                Client = "Internal"
+                Department = "Operations"
+                BillingType = "Non-Billable"
+                Status = "Active"
+                Budget = 0
+                Rate = 0
+                Notes = "General administrative tasks"
+            }
+            "MEETING" = @{
+                Id1 = "101"
+                Id2 = "MTG"
+                Name = "Meetings & Calls"
+                Client = "Internal"
+                Department = "Various"
+                BillingType = "Non-Billable"
+                Status = "Active"
+                Budget = 0
+                Rate = 0
+                Notes = "Team meetings and calls"
+            }
+            "TRAINING" = @{
+                Id1 = "102"
+                Id2 = "TRN"
+                Name = "Training & Learning"
+                Client = "Internal"
+                Department = "HR"
+                BillingType = "Non-Billable"
+                Status = "Active"
+                Budget = 0
+                Rate = 0
+                Notes = "Professional development"
+            }
+            "BREAK" = @{
+                Id1 = "103"
+                Id2 = "BRK"
+                Name = "Breaks & Personal"
+                Client = "Internal"
+                Department = "Personal"
+                BillingType = "Non-Billable"
+                Status = "Active"
+                Budget = 0
+                Rate = 0
+                Notes = "Breaks and personal time"
+            }
+        }
+        # Todo Tracker Settings
+        DefaultPriority = "Medium"
+        DefaultCategory = "General"
+        ShowCompletedDays = 7
+        EnableTimeTracking = $true
+        AutoArchiveDays = 30
+        # Command Snippets Settings
+        CommandSnippets = @{
+            EnableHotkeys = $true
+            AutoCopyToClipboard = $true
+            ShowInTaskList = $false
+            DefaultCategory = "Commands"
+            RecentLimit = 10
+        }
+        # Excel Integration Settings
+        ExcelFormConfig = @{
+            WorksheetName = "Project Info"
+            StandardFields = @{
+                "Id1" = @{ LabelCell = "A5"; ValueCell = "B5"; Label = "Project ID"; Field = "Id1" }
+                "Id2" = @{ LabelCell = "A6"; ValueCell = "B6"; Label = "Task Code"; Field = "Id2" }
+                "Name" = @{ LabelCell = "A7"; ValueCell = "B7"; Label = "Project Name"; Field = "Name" }
+                "FullName" = @{ LabelCell = "A8"; ValueCell = "B8"; Label = "Full Description"; Field = "FullName" }
+                "AssignedDate" = @{ LabelCell = "A9"; ValueCell = "B9"; Label = "Start Date"; Field = "AssignedDate" }
+                "DueDate" = @{ LabelCell = "A10"; ValueCell = "B10"; Label = "End Date"; Field = "DueDate" }
+                "Manager" = @{ LabelCell = "A11"; ValueCell = "B11"; Label = "Project Manager"; Field = "Manager" }
+                "Budget" = @{ LabelCell = "A12"; ValueCell = "B12"; Label = "Budget"; Field = "Budget" }
+                "Status" = @{ LabelCell = "A13"; ValueCell = "B13"; Label = "Status"; Field = "Status" }
+                "Priority" = @{ LabelCell = "A14"; ValueCell = "B14"; Label = "Priority"; Field = "Priority" }
+                "Department" = @{ LabelCell = "A15"; ValueCell = "B15"; Label = "Department"; Field = "Department" }
+                "Client" = @{ LabelCell = "A16"; ValueCell = "B16"; Label = "Client"; Field = "Client" }
+                "BillingType" = @{ LabelCell = "A17"; ValueCell = "B17"; Label = "Billing Type"; Field = "BillingType" }
+                "Rate" = @{ LabelCell = "A18"; ValueCell = "B18"; Label = "Hourly Rate"; Field = "Rate" }
+            }
+        }
+        # UI Theme
+        Theme = @{
+            Header = "Cyan"
+            Success = "Green"
+            Warning = "Yellow"
+            Error = "Red"
+            Info = "Blue"
+            Accent = "Magenta"
+            Subtle = "DarkGray"
+        }
+    }
+}
+
+#endregion
+
+#region Project Management
+
+function Get-ProjectOrTemplate {
+    param([string]$Key)
+    
+    if ($script:Data.Projects.ContainsKey($Key)) {
+        return $script:Data.Projects[$Key]
+    } elseif ($script:Data.Settings.TimeTrackerTemplates.ContainsKey($Key)) {
+        return $script:Data.Settings.TimeTrackerTemplates[$Key]
+    }
+    
+    return $null
+}
+
+function Add-Project {
+    Write-Header "Add New Project"
+    
+    $key = Read-Host "Project Key (short identifier)"
+    if ($script:Data.Projects.ContainsKey($key) -or $script:Data.Settings.TimeTrackerTemplates.ContainsKey($key)) {
+        Write-Error "Project key already exists"
+        return
+    }
+    
+    Write-Host "`nBasic Information:" -ForegroundColor Yellow
+    $name = Read-Host "Project Name"
+    $id1 = Read-Host "ID1 (custom identifier)"
+    $id2 = Read-Host "ID2 (max 9 chars)"
+    
+    Write-Host "`nClient & Department:" -ForegroundColor Yellow
+    $client = Read-Host "Client Name"
+    $department = Read-Host "Department"
+    
+    Write-Host "`nBilling Information:" -ForegroundColor Yellow
+    Write-Host "Billing Type: [B]illable, [N]on-Billable, [F]ixed Price"
+    $billingChoice = Read-Host "Choice (B/N/F)"
+    $billingType = switch ($billingChoice.ToUpper()) {
+        "B" { "Billable" }
+        "F" { "Fixed Price" }
+        default { "Non-Billable" }
+    }
+    
+    $rate = 0
+    $budget = 0
+    
+    if ($billingType -ne "Non-Billable") {
+        $rateInput = Read-Host "Hourly Rate (default: $($script:Data.Settings.DefaultRate))"
+        if ($rateInput) {
+            $rate = [double]$rateInput
+        } else {
+            $rate = $script:Data.Settings.DefaultRate
+        }
+        
+        $budgetInput = Read-Host "Budget Hours (0 for unlimited)"
+        if ($budgetInput) {
+            $budget = [double]$budgetInput
+        }
+    }
+    
+    Write-Host "`nProject Status:" -ForegroundColor Yellow
+    Write-Host "[A]ctive, [O]n Hold, [C]ompleted"
+    $statusChoice = Read-Host "Status (default: Active)"
+    $status = switch ($statusChoice.ToUpper()) {
+        "O" { "On Hold" }
+        "C" { "Completed" }
+        default { "Active" }
+    }
+    
+    $notes = Read-Host "`nProject Notes (optional)"
+    
+    $startDate = (Get-Date).ToString("yyyy-MM-dd")
+    
+    $script:Data.Projects[$key] = @{
+        Name = $name
+        Id1 = $id1
+        Id2 = $id2
+        Client = $client
+        Department = $department
+        BillingType = $billingType
+        Rate = $rate
+        Budget = $budget
+        Status = $status
+        Notes = $notes
+        StartDate = $startDate
+        TotalHours = 0
+        TotalBilled = 0
+        CompletedTasks = 0
+        ActiveTasks = 0
+        Manager = ""
+        Priority = "Medium"
+        DueDate = $null
+        CreatedDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+    
+    Save-UnifiedData
+    Write-Success "Project added: $key"
+}
+
+function Edit-Project {
+    Show-ProjectsAndTemplates -Simple
+    Write-Host ""
+    $projectKey = Read-Host "Enter project key to edit"
+    
+    if (-not $script:Data.Projects.ContainsKey($projectKey)) {
+        Write-Error "Project not found or cannot edit templates"
+        return
+    }
+    
+    $project = $script:Data.Projects[$projectKey]
+    
+    Write-Header "Edit Project: $projectKey"
+    Write-Host "Leave field empty to keep current value" -ForegroundColor Gray
+    
+    # Show current values and get updates
+    Write-Host "`nCurrent Name: $($project.Name)"
+    $newName = Read-Host "New Name"
+    if ($newName) { $project.Name = $newName }
+    
+    Write-Host "`nCurrent Client: $($project.Client)"
+    $newClient = Read-Host "New Client"
+    if ($newClient) { $project.Client = $newClient }
+    
+    Write-Host "`nCurrent Department: $($project.Department)"
+    $newDept = Read-Host "New Department"
+    if ($newDept) { $project.Department = $newDept }
+    
+    Write-Host "`nCurrent Status: $($project.Status)"
+    Write-Host "[A]ctive, [O]n Hold, [C]ompleted"
+    $newStatus = Read-Host "New Status"
+    if ($newStatus) {
+        $project.Status = switch ($newStatus.ToUpper()) {
+            "A" { "Active" }
+            "O" { "On Hold" }
+            "C" { "Completed" }
+            default { $project.Status }
+        }
+    }
+    
+    if ($project.BillingType -ne "Non-Billable") {
+        Write-Host "`nCurrent Rate: `$$($project.Rate)"
+        $newRate = Read-Host "New Rate"
+        if ($newRate) { $project.Rate = [double]$newRate }
+        
+        Write-Host "`nCurrent Budget: $($project.Budget) hours"
+        $newBudget = Read-Host "New Budget"
+        if ($newBudget) { $project.Budget = [double]$newBudget }
+    }
+    
+    Write-Host "`nCurrent Notes: $($project.Notes)"
+    $newNotes = Read-Host "New Notes"
+    if ($newNotes) { $project.Notes = $newNotes }
+    
+    Save-UnifiedData
+    Write-Success "Project updated!"
+}
+
+function Update-ProjectStatistics {
+    param([string]$ProjectKey)
+    
+    $project = $script:Data.Projects[$ProjectKey]
+    if (-not $project) { return }
+    
+    # Calculate total hours
+    $projectEntries = $script:Data.TimeEntries | Where-Object { $_.ProjectKey -eq $ProjectKey }
+    $project.TotalHours = [Math]::Round(($projectEntries | Measure-Object -Property Hours -Sum).Sum, 2)
+    
+    # Update task counts
+    $projectTasks = $script:Data.Tasks | Where-Object { $_.ProjectKey -eq $ProjectKey -and $_.IsCommand -ne $true }
+    $project.CompletedTasks = ($projectTasks | Where-Object { $_.Completed }).Count
+    $project.ActiveTasks = ($projectTasks | Where-Object { -not $_.Completed }).Count
+}
+
+function Export-Projects {
+    Write-Header "Export Projects"
+    
+    $exportData = @()
+    foreach ($proj in $script:Data.Projects.GetEnumerator()) {
+        $exportData += [PSCustomObject]@{
+            Key = $proj.Key
+            Name = $proj.Value.Name
+            Id1 = $proj.Value.Id1
+            Id2 = $proj.Value.Id2
+            Client = $proj.Value.Client
+            Department = $proj.Value.Department
+            Status = $proj.Value.Status
+            BillingType = $proj.Value.BillingType
+            Rate = $proj.Value.Rate
+            Budget = $proj.Value.Budget
+            TotalHours = $proj.Value.TotalHours
+            ActiveTasks = $proj.Value.ActiveTasks
+            CompletedTasks = $proj.Value.CompletedTasks
+        }
+    }
+    
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $exportFile = Join-Path ([Environment]::GetFolderPath("Desktop")) "Projects_Export_$timestamp.csv"
+    
+    $exportData | Export-Csv $exportFile -NoTypeInformation
+    Write-Success "Projects exported to: $exportFile"
+    
+    # Open file
+    Start-Process $exportFile
+}
+
+function Batch-ImportProjects {
+    Write-Warning "Feature not yet implemented"
+}
+
+#endregion
+
+#region Command Snippets System
+
+function Add-CommandSnippet {
+    Write-Header "Add Command Snippet"
+    
+    $name = Read-Host "Command name/description"
+    if ([string]::IsNullOrEmpty($name)) {
+        Write-Error "Command name cannot be empty!"
+        return
+    }
+    
+    Write-Host "`nEnter command (press Enter twice to finish):" -ForegroundColor Gray
+    $lines = @()
+    while ($true) {
+        $line = Read-Host
+        if ([string]::IsNullOrEmpty($line) -and $lines.Count -gt 0) {
+            break
+        }
+        $lines += $line
+    }
+    
+    $command = $lines -join "`n"
+    if ([string]::IsNullOrEmpty($command)) {
+        Write-Error "Command cannot be empty!"
+        return
+    }
+    
+    # Category
+    $existingCategories = $script:Data.Tasks | 
+        Where-Object { $_.IsCommand -eq $true } | 
+        Select-Object -ExpandProperty Category -Unique | 
+        Where-Object { $_ }
+    
+    if ($existingCategories) {
+        Write-Host "`nExisting categories: $($existingCategories -join ', ')" -ForegroundColor DarkCyan
+    }
+    $category = Read-Host "Category (default: $($script:Data.Settings.CommandSnippets.DefaultCategory))"
+    if ([string]::IsNullOrEmpty($category)) {
+        $category = $script:Data.Settings.CommandSnippets.DefaultCategory
+    }
+    
+    # Tags
+    Write-Host "`nTags (comma-separated, optional):" -ForegroundColor Gray
+    $tagsInput = Read-Host "Tags"
+    $tags = if ($tagsInput) {
+        $tagsInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    } else { @() }
+    
+    # Hotkey
+    $hotkey = ""
+    if ($script:Data.Settings.CommandSnippets.EnableHotkeys) {
+        Write-Host "`nAssign hotkey (optional, e.g., 'ctrl+1'):" -ForegroundColor Gray
+        $hotkey = Read-Host "Hotkey"
+    }
+    
+    # Create as special task
+    $snippet = @{
+        Id = New-TodoId
+        Description = $name
+        Priority = "Low"
+        Category = $category
+        ProjectKey = $null
+        StartDate = $null
+        DueDate = $null
+        Tags = $tags
+        Progress = 0
+        Completed = $false
+        CreatedDate = [datetime]::Now.ToString("yyyy-MM-dd HH:mm:ss")
+        CompletedDate = $null
+        EstimatedTime = 0
+        TimeSpent = 0
+        Subtasks = @()
+        Notes = $command
+        LastModified = [datetime]::Now.ToString("yyyy-MM-dd HH:mm:ss")
+        IsCommand = $true
+        Hotkey = $hotkey
+        LastUsed = $null
+        UseCount = 0
+    }
+    
+    $script:Data.Tasks += $snippet
+    Save-UnifiedData
+    
+    Write-Success "Command snippet added: $name"
+    
+    if ($script:Data.Settings.CommandSnippets.AutoCopyToClipboard) {
+        if (Copy-ToClipboard $command) {
+            Write-Info "Command copied to clipboard!"
+        }
+    }
+}
+
+function Get-CommandSnippet {
+    param(
+        [string]$Id,
+        [string]$SearchTerm,
+        [string]$Category,
+        [string[]]$Tags
+    )
+    
+    $snippets = $script:Data.Tasks | Where-Object { $_.IsCommand -eq $true }
+    
+    if ($Id) {
+        return $snippets | Where-Object { $_.Id -like "$Id*" } | Select-Object -First 1
+    }
+    
+    if ($SearchTerm) {
+        $snippets = $snippets | Where-Object { 
+            $_.Description -like "*$SearchTerm*" -or 
+            $_.Notes -like "*$SearchTerm*" -or
+            ($_.Tags -join " ") -like "*$SearchTerm*"
+        }
+    }
+    
+    if ($Category) {
+        $snippets = $snippets | Where-Object { $_.Category -eq $Category }
+    }
+    
+    if ($Tags) {
+        $snippets = $snippets | Where-Object {
+            $snippetTags = $_.Tags
+            $found = $false
+            foreach ($tag in $Tags) {
+                if ($tag -in $snippetTags) {
+                    $found = $true
+                    break
+                }
+            }
+            $found
+        }
+    }
+    
+    return $snippets
+}
+
+function Search-CommandSnippets {
+    Write-Header "Search Command Snippets"
+    
+    $searchTerm = Read-Host "Search term (leave empty for all)"
+    
+    $snippets = Get-CommandSnippet -SearchTerm $searchTerm | Sort-Object UseCount -Descending
+    
+    if ($snippets.Count -eq 0) {
+        Write-Host "No snippets found" -ForegroundColor Gray
+        return
+    }
+    
+    # Display results in table
+    $tableData = $snippets | ForEach-Object {
+        [PSCustomObject]@{
+            ID = $_.Id.Substring(0, 6)
+            Name = $_.Description
+            Category = $_.Category
+            Tags = ($_.Tags -join ", ")
+            Used = $_.UseCount
+            Hotkey = if ($_.Hotkey) { $_.Hotkey } else { "-" }
+        }
+    }
+    
+    $tableData | Format-TableUnicode -Columns @(
+        @{Name="ID"; Title="ID"; Width=8}
+        @{Name="Name"; Title="Name"; Width=30}
+        @{Name="Category"; Title="Category"; Width=15}
+        @{Name="Tags"; Title="Tags"; Width=20}
+        @{Name="Used"; Title="Used"; Width=6; Align="Right"}
+        @{Name="Hotkey"; Title="Hotkey"; Width=10}
+    ) -Title "Command Snippets"
+    
+    Write-Host "`nEnter snippet ID to copy/execute, or press Enter to cancel"
+    $selectedId = Read-Host
+    
+    if ($selectedId) {
+        Execute-CommandSnippet -Id $selectedId
+    }
+}
+
+function Execute-CommandSnippet {
+    param([string]$Id)
+    
+    $snippet = Get-CommandSnippet -Id $Id
+    if (-not $snippet) {
+        Write-Error "Snippet not found!"
+        return
+    }
+    
+    Write-Host "`nCommand: $($snippet.Description)" -ForegroundColor Cyan
+    Write-Host "Category: $($snippet.Category)" -ForegroundColor Gray
+    if ($snippet.Tags.Count -gt 0) {
+        Write-Host "Tags: $($snippet.Tags -join ', ')" -ForegroundColor Gray
+    }
+    
+    Write-Host "`nCommand content:" -ForegroundColor Yellow
+    Write-Host $snippet.Notes -ForegroundColor White
+    
+    # Update usage stats
+    $snippet.LastUsed = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $snippet.UseCount++
+    Save-UnifiedData
+    
+    Write-Host "`n[C]opy to clipboard, [E]xecute (PowerShell), [B]oth, or [Enter] to cancel"
+    $action = Read-Host
+    
+    switch ($action.ToUpper()) {
+        "C" {
+            if (Copy-ToClipboard $snippet.Notes) {
+                Write-Success "Command copied to clipboard!"
+            }
+        }
+        "E" {
+            Write-Warning "Execute this command?"
+            $confirm = Read-Host "Type 'yes' to confirm"
+            if ($confirm -eq 'yes') {
+                try {
+                    Invoke-Expression $snippet.Notes
+                    Write-Success "Command executed!"
+                } catch {
+                    Write-Error "Execution failed: $_"
+                }
+            }
+        }
+        "B" {
+            if (Copy-ToClipboard $snippet.Notes) {
+                Write-Success "Command copied to clipboard!"
+            }
+            Write-Warning "Execute this command?"
+            $confirm = Read-Host "Type 'yes' to confirm"
+            if ($confirm -eq 'yes') {
+                try {
+                    Invoke-Expression $snippet.Notes
+                    Write-Success "Command executed!"
+                } catch {
+                    Write-Error "Execution failed: $_"
+                }
+            }
+        }
+    }
+}
+
+function Remove-CommandSnippet {
+    param([string]$Id)
+    
+    if (-not $Id) {
+        Search-CommandSnippets
+        $Id = Read-Host "`nEnter snippet ID to delete"
+    }
+    
+    $snippet = Get-CommandSnippet -Id $Id
+    if (-not $snippet) {
+        Write-Error "Snippet not found!"
+        return
+    }
+    
+    Write-Warning "Delete snippet: '$($snippet.Description)'?"
+    $confirm = Read-Host "Type 'yes' to confirm"
+    
+    if ($confirm -eq 'yes') {
+        $script:Data.Tasks = $script:Data.Tasks | Where-Object { $_.Id -ne $snippet.Id }
+        Save-UnifiedData
+        Write-Success "Snippet deleted!"
+    }
+}
+
+function Manage-CommandSnippets {
+    while ($true) {
+        Write-Header "Command Snippets"
+        
+        $snippetCount = ($script:Data.Tasks | Where-Object { $_.IsCommand -eq $true }).Count
+        Write-Host "Total snippets: $snippetCount" -ForegroundColor Gray
+        
+        # Show recent snippets
+        $recent = Get-RecentCommandSnippets -Count 5
+        if ($recent.Count -gt 0) {
+            Write-Host "`nRecent snippets:" -ForegroundColor Yellow
+            foreach ($snippet in $recent) {
+                Write-Host "  [$($snippet.Id.Substring(0,6))] $($snippet.Description)" -NoNewline
+                if ($snippet.Hotkey) {
+                    Write-Host " ($($snippet.Hotkey))" -NoNewline -ForegroundColor DarkCyan
+                }
+                Write-Host " - Used: $($snippet.UseCount)" -ForegroundColor Gray
+            }
+        }
+        
+        Write-Host "`n[A]dd snippet"
+        Write-Host "[S]earch/Browse snippets"
+        Write-Host "[E]xecute by ID"
+        Write-Host "[D]elete snippet"
+        Write-Host "[C]ategories"
+        Write-Host "[H]otkeys"
+        Write-Host "[B]ack"
+        
+        $choice = Read-Host "`nChoice"
+        
+        switch ($choice.ToUpper()) {
+            "A" { Add-CommandSnippet }
+            "S" { Search-CommandSnippets }
+            "E" {
+                $id = Read-Host "Snippet ID"
+                Execute-CommandSnippet -Id $id
+            }
+            "D" { Remove-CommandSnippet }
+            "C" { Show-SnippetCategories }
+            "H" { Show-SnippetHotkeys }
+            "B" { return }
+        }
+        
+        if ($choice -ne "B" -and $choice -ne "b") {
+            Write-Host "`nPress Enter to continue..."
+            Read-Host
+        }
+    }
+}
+
+function Get-RecentCommandSnippets {
+    param([int]$Count = 10)
+    
+    $snippets = $script:Data.Tasks | Where-Object { $_.IsCommand -eq $true }
+    
+    # Sort by last used, then by use count
+    $sorted = $snippets | Sort-Object @{
+        Expression = { if ($_.LastUsed) { [DateTime]::Parse($_.LastUsed) } else { [DateTime]::MinValue } }
+        Descending = $true
+    }, @{
+        Expression = { $_.UseCount }
+        Descending = $true
+    }
+    
+    return $sorted | Select-Object -First $Count
+}
+
+function Show-SnippetCategories {
+    Write-Header "Snippet Categories"
+    
+    $snippets = $script:Data.Tasks | Where-Object { $_.IsCommand -eq $true }
+    $categories = $snippets | Group-Object Category | Sort-Object Count -Descending
+    
+    if ($categories.Count -eq 0) {
+        Write-Host "No categories found" -ForegroundColor Gray
+        return
+    }
+    
+    Write-Host "Category usage:" -ForegroundColor Yellow
+    foreach ($cat in $categories) {
+        Write-Host "  $($cat.Name): $($cat.Count) snippet(s)"
+        
+        # Show top snippets in category
+        $topInCategory = $cat.Group | Sort-Object UseCount -Descending | Select-Object -First 3
+        foreach ($snippet in $topInCategory) {
+            Write-Host "    - $($snippet.Description)" -ForegroundColor Gray
+        }
+    }
+}
+
+function Show-SnippetHotkeys {
+    Write-Header "Snippet Hotkeys"
+    
+    $snippetsWithHotkeys = $script:Data.Tasks | Where-Object { $_.IsCommand -eq $true -and $_.Hotkey }
+    
+    if ($snippetsWithHotkeys.Count -eq 0) {
+        Write-Host "No hotkeys assigned" -ForegroundColor Gray
+        return
+    }
+    
+    Write-Host "Assigned hotkeys:" -ForegroundColor Yellow
+    foreach ($snippet in $snippetsWithHotkeys | Sort-Object Hotkey) {
+        Write-Host "  $($snippet.Hotkey): $($snippet.Description)"
+    }
+    
+    Write-Warning "`nNote: Hotkey functionality requires external keyboard hook implementation"
+}
+
+function Edit-CommandSnippetSettings {
+    Write-Header "Command Snippet Settings"
+    
+    Write-Host "Current settings:" -ForegroundColor Yellow
+    Write-Host "  Enable Hotkeys:       $(if ($script:Data.Settings.CommandSnippets.EnableHotkeys) { 'Yes' } else { 'No' })"
+    Write-Host "  Auto-Copy:           $(if ($script:Data.Settings.CommandSnippets.AutoCopyToClipboard) { 'Yes' } else { 'No' })"
+    Write-Host "  Show in Task List:   $(if ($script:Data.Settings.CommandSnippets.ShowInTaskList) { 'Yes' } else { 'No' })"
+    Write-Host "  Default Category:    $($script:Data.Settings.CommandSnippets.DefaultCategory)"
+    Write-Host "  Recent Limit:        $($script:Data.Settings.CommandSnippets.RecentLimit)"
+    
+    Write-Host "`nLeave empty to keep current value" -ForegroundColor Gray
+    
+    Write-Host "`nEnable hotkeys? (Y/N)"
+    $hotkeys = Read-Host
+    if ($hotkeys) {
+        $script:Data.Settings.CommandSnippets.EnableHotkeys = ($hotkeys -eq 'Y' -or $hotkeys -eq 'y')
+    }
+    
+    Write-Host "`nAuto-copy to clipboard? (Y/N)"
+    $autoCopy = Read-Host
+    if ($autoCopy) {
+        $script:Data.Settings.CommandSnippets.AutoCopyToClipboard = ($autoCopy -eq 'Y' -or $autoCopy -eq 'y')
+    }
+    
+    Write-Host "`nShow command snippets in task list? (Y/N)"
+    $showInTasks = Read-Host
+    if ($showInTasks) {
+        $script:Data.Settings.CommandSnippets.ShowInTaskList = ($showInTasks -eq 'Y' -or $showInTasks -eq 'y')
+    }
+    
+    Write-Host "`nDefault category: $($script:Data.Settings.CommandSnippets.DefaultCategory)"
+    $newCategory = Read-Host "New default category"
+    if ($newCategory) {
+        $script:Data.Settings.CommandSnippets.DefaultCategory = $newCategory
+    }
+    
+    Write-Host "`nRecent snippets limit: $($script:Data.Settings.CommandSnippets.RecentLimit)"
+    $newLimit = Read-Host "New limit"
+    if ($newLimit) {
+        try {
+            $script:Data.Settings.CommandSnippets.RecentLimit = [int]$newLimit
+        } catch {
+            Write-Warning "Invalid number format"
+        }
+    }
+    
+    Save-UnifiedData
+    Write-Success "Settings updated!"
+}
+
+#endregion
+
+#region Task Status Functions
+
+function Get-TaskStatus {
+    param($Task)
+    
+    if ($Task.Completed) { return "Completed" }
+    if ($Task.Progress -ge 100) { return "Done" }
+    if ($Task.Progress -gt 0) { return "In Progress" }
+    if ($Task.DueDate) {
+        $daysUntil = ([datetime]::Parse($Task.DueDate) - [datetime]::Today).Days
+        if ($daysUntil -lt 0) { return "Overdue" }
+        if ($daysUntil -eq 0) { return "Due Today" }
+        if ($daysUntil -le 3) { return "Due Soon" }
+    }
+    if ($Task.StartDate) {
+        $daysUntil = ([datetime]::Parse($Task.StartDate) - [datetime]::Today).Days
+        if ($daysUntil -gt 0) { return "Scheduled" }
+    }
+    return "Pending"
+}
+
+function Get-PriorityInfo {
+    param($Priority)
+    switch ($Priority) {
+        "Critical" { return @{ Color = "Magenta"; Icon = "🔥" } }
+        "High" { return @{ Color = "Red"; Icon = "🔴" } }
+        "Medium" { return @{ Color = "Yellow"; Icon = "🟡" } }
+        "Low" { return @{ Color = "Green"; Icon = "🟢" } }
+        default { return @{ Color = "Gray"; Icon = "⚪" } }
+    }
+}
+
+#endregion
+
+#region Display Functions
+
+function Show-ProjectsAndTemplates {
+    param([switch]$Simple)
+    
+    if (-not $Simple) {
+        Write-Header "Projects & Templates"
+    }
+    
+    Write-Host "`nActive Projects:" -ForegroundColor Yellow
+    $activeProjects = $script:Data.Projects.GetEnumerator() |
+        Where-Object { $_.Value.Status -eq "Active" } |
+        Sort-Object { $_.Value.Name }
+    
+    if ($activeProjects.Count -eq 0) {
+        Write-Host "  None" -ForegroundColor Gray
+    } else {
+        foreach ($proj in $activeProjects) {
+            Write-Host "  ● [$($proj.Key)]" -NoNewline -ForegroundColor Green
+            Write-Host " $($proj.Value.Name)" -NoNewline
+            Write-Host " - $($proj.Value.Client)" -ForegroundColor Gray -NoNewline
+            
+            if ($proj.Value.BillingType -eq "Billable") {
+                Write-Host " ($" -NoNewline -ForegroundColor DarkGreen
+                Write-Host "$($proj.Value.Rate)/hr" -NoNewline -ForegroundColor DarkGreen
+                Write-Host ")" -ForegroundColor DarkGreen -NoNewline
+            }
+            
+            # Show task count (excluding command snippets)
+            $taskCount = ($script:Data.Tasks | Where-Object { $_.ProjectKey -eq $proj.Key -and $_.IsCommand -ne $true -and -not $_.Completed }).Count
+            if ($taskCount -gt 0) {
+                Write-Host " [$taskCount task$(if ($taskCount -ne 1) {'s'})]" -ForegroundColor Cyan -NoNewline
+            }
+            Write-Host ""
+        }
+    }
+    
+    # Other status projects
+    $otherProjects = $script:Data.Projects.GetEnumerator() |
+        Where-Object { $_.Value.Status -ne "Active" } |
+        Sort-Object { $_.Value.Status }, { $_.Value.Name }
+    
+    if ($otherProjects.Count -gt 0) {
+        Write-Host "`nOther Projects:" -ForegroundColor Yellow
+        foreach ($proj in $otherProjects) {
+            $statusIcon = switch ($proj.Value.Status) {
+                "On Hold" { "◐" }
+                "Completed" { "○" }
+                default { "?" }
+            }
+            $statusColor = switch ($proj.Value.Status) {
+                "On Hold" { "Yellow" }
+                "Completed" { "DarkGray" }
+                default { "White" }
+            }
+            
+            Write-Host "  " -NoNewline
+            Write-Host $statusIcon -ForegroundColor $statusColor -NoNewline
+            Write-Host " [$($proj.Key)]" -NoNewline -ForegroundColor $statusColor
+            Write-Host " $($proj.Value.Name)" -NoNewline
+            Write-Host " - $($proj.Value.Client)" -ForegroundColor Gray -NoNewline
+            Write-Host " ($($proj.Value.Status))" -ForegroundColor $statusColor
+        }
+    }
+    
+    Write-Host "`nTemplates:" -ForegroundColor Yellow
+    foreach ($tmpl in $script:Data.Settings.TimeTrackerTemplates.GetEnumerator()) {
+        Write-Host "  ● [$($tmpl.Key)]" -NoNewline -ForegroundColor Blue
+        Write-Host " $($tmpl.Value.Name)" -NoNewline
+        Write-Host " - Internal" -ForegroundColor Gray
+    }
+}
+
+function Show-ProjectDetail {
+    param([string]$ProjectKey)
+    
+    if (-not $ProjectKey) {
+        Show-ProjectsAndTemplates
+        $ProjectKey = Read-Host "`nEnter Project Key for details"
+    }
+    
+    $project = Get-ProjectOrTemplate $ProjectKey
+    
+    if (-not $project) {
+        Write-Error "Project not found!"
+        return
+    }
+    
+    # Update statistics if it's a real project
+    if ($script:Data.Projects.ContainsKey($ProjectKey)) {
+        Update-ProjectStatistics -ProjectKey $ProjectKey
+    }
+    
+    Write-Header "Project Details: $($project.Name)"
+    
+    # Use Format-TableUnicode for details
+    $details = @(
+        [PSCustomObject]@{Property="Name"; Value=$project.Name}
+        [PSCustomObject]@{Property="Key"; Value=$ProjectKey}
+        [PSCustomObject]@{Property="ID1"; Value=$project.Id1}
+        [PSCustomObject]@{Property="ID2"; Value=$project.Id2}
+        [PSCustomObject]@{Property="Client"; Value=$project.Client}
+        [PSCustomObject]@{Property="Department"; Value=$project.Department}
+        [PSCustomObject]@{Property="Status"; Value=$project.Status}
+        [PSCustomObject]@{Property="Billing Type"; Value=$project.BillingType}
+    )
+    
+    if ($project.BillingType -eq "Billable") {
+        $details += [PSCustomObject]@{Property="Rate"; Value="`$$($project.Rate)/hr"}
+    }
+    
+    if ($project.Budget -gt 0) {
+        $details += [PSCustomObject]@{Property="Budget"; Value="$($project.Budget) hours"}
+        
+        if ($project.TotalHours -gt 0) {
+            $percentUsed = [Math]::Round(($project.TotalHours / $project.Budget) * 100, 1)
+            $details += [PSCustomObject]@{Property="Budget Used"; Value="$percentUsed%"}
+            $details += [PSCustomObject]@{Property="Remaining"; Value="$([Math]::Round($project.Budget - $project.TotalHours, 2)) hours"}
+        }
+    }
+    
+    if ($project.TotalHours -gt 0) {
+        $details += [PSCustomObject]@{Property="Total Hours"; Value=$project.TotalHours}
+        
+        if ($project.BillingType -eq "Billable" -and $project.Rate -gt 0) {
+            $totalValue = $project.TotalHours * $project.Rate
+            $details += [PSCustomObject]@{Property="Total Value"; Value="`$$([Math]::Round($totalValue, 2))"}
+        }
+    }
+    
+    $details | Format-TableUnicode -Columns @(
+        @{Name="Property"; Title="Property"; Width=20}
+        @{Name="Value"; Title="Value"; Width=40}
+    ) -BorderStyle "Rounded"
+    
+    # Task Summary
+    if ($project.ActiveTasks -gt 0 -or $project.CompletedTasks -gt 0) {
+        Write-Host "`nTask Summary:" -ForegroundColor Yellow
+        Write-Host "  Active Tasks:        $($project.ActiveTasks)"
+        Write-Host "  Completed Tasks:     $($project.CompletedTasks)"
+        
+        $totalTasks = $project.ActiveTasks + $project.CompletedTasks
+        if ($totalTasks -gt 0) {
+            $completionPercent = [Math]::Round(($project.CompletedTasks / $totalTasks) * 100, 1)
+            Write-Host "  Completion:          $completionPercent%"
+        }
+    }
+    
+    # Recent Time Entries
+    $recentEntries = $script:Data.TimeEntries |
+        Where-Object { $_.ProjectKey -eq $ProjectKey } |
+        Sort-Object Date -Descending |
+        Select-Object -First 5
+    
+    if ($recentEntries.Count -gt 0) {
+        Write-Host "`nRecent Time Entries:" -ForegroundColor Yellow
+        $entryData = $recentEntries | ForEach-Object {
+            $task = if ($_.TaskId) {
+                $t = $script:Data.Tasks | Where-Object { $_.Id -eq $_.TaskId }
+                if ($t) { $t.Description } else { "" }
+            } else { "" }
+            
+            [PSCustomObject]@{
+                Date = [DateTime]::Parse($_.Date).ToString("MMM dd")
+                Hours = "$($_.Hours)h"
+                Task = if ($task) { $task } else { $_.Description }
+            }
+        }
+        
+        $entryData | Format-TableUnicode -Columns @(
+            @{Name="Date"; Title="Date"; Width=10}
+            @{Name="Hours"; Title="Hours"; Width=8; Align="Right"}
+            @{Name="Task"; Title="Description"; Width=40}
+        ) -BorderStyle "None"
+    }
+    
+    # Active Tasks
+    $activeTasks = $script:Data.Tasks | Where-Object {
+        $_.ProjectKey -eq $ProjectKey -and -not $_.Completed -and $_.IsCommand -ne $true
+    } | Select-Object -First 5
+    
+    if ($activeTasks.Count -gt 0) {
+        Write-Host "`nActive Tasks:" -ForegroundColor Yellow
+        foreach ($task in $activeTasks) {
+            $priorityInfo = Get-PriorityInfo $task.Priority
+            Write-Host "  $($priorityInfo.Icon) [$($task.Id.Substring(0,6))] $($task.Description)"
+        }
+    }
+}
+
+#endregion
+
+#region Excel Import Functions
+
+function Import-ProjectFromExcel {
+    Write-Header "Import Project from Excel"
+    
+    $filePath = Read-Host "Enter Excel file path"
+    
+    if (-not (Test-Path $filePath)) {
+        Write-Error "File not found!"
+        return
+    }
+    
+    try {
+        Write-Info "Reading Excel form..."
+        
+        $excel = New-Object -ComObject Excel.Application
+        $excel.Visible = $false
+        $excel.DisplayAlerts = $false
+        
+        $workbook = $excel.Workbooks.Open($filePath)
+        
+        # Get worksheet
+        $worksheetName = $script:Data.Settings.ExcelFormConfig.WorksheetName
+        $worksheet = $null
+        
+        try {
+            $worksheet = $workbook.Worksheets.Item($worksheetName)
+        } catch {
+            Write-Warning "Worksheet '$worksheetName' not found, using first sheet"
+            $worksheet = $workbook.Worksheets.Item(1)
+        }
+        
+        # Read project data
+        $projectData = @{
+            SourceFile = $filePath
+            ImportedDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            CreatedDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            TotalHours = 0
+            TotalBilled = 0
+            CompletedTasks = 0
+            ActiveTasks = 0
+        }
+        
+        # Read standard fields from defined cells
+        foreach ($field in $script:Data.Settings.ExcelFormConfig.StandardFields.Keys) {
+            $fieldConfig = $script:Data.Settings.ExcelFormConfig.StandardFields[$field]
+            
+            try {
+                # Read the value cell
+                $value = $worksheet.Range($fieldConfig.ValueCell).Text
+                
+                # Optionally verify the label matches
+                if ($fieldConfig.LabelCell) {
+                    $label = $worksheet.Range($fieldConfig.LabelCell).Text
+                    if ($label -and $label -notlike "*$($fieldConfig.Label)*") {
+                        Write-Warning "Label mismatch for $field : Expected '$($fieldConfig.Label)', found '$label'"
+                    }
+                }
+                
+                # Store the value if not empty
+                if ($value -and $value.Trim() -ne "") {
+                    $projectData[$fieldConfig.Field] = $value.Trim()
+                }
+                
+            } catch {
+                Write-Warning "Could not read field $field : $_"
+            }
+        }
+        
+        # Close Excel
+        $workbook.Close($false)
+        $excel.Quit()
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($worksheet) | Out-Null
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($workbook) | Out-Null
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
+        
+        # Show what was read
+        Write-Host "`nData read from form:" -ForegroundColor $script:Data.Settings.Theme.Info
+        foreach ($key in $projectData.Keys | Sort-Object) {
+            if ($key -notin @('SourceFile', 'ImportedDate', 'CreatedDate', 'TotalHours', 'TotalBilled', 'CompletedTasks', 'ActiveTasks')) {
+                Write-Host "  $key : $($projectData[$key])" -ForegroundColor $script:Data.Settings.Theme.Subtle
+            }
+        }
+        
+        # Determine project key
+        $projectKey = if ($projectData.Id2) { $projectData.Id2 } elseif ($projectData.Id1) { $projectData.Id1 } else { Read-Host "`nProject Key (short identifier)" }
+        
+        # Check if exists
+        if ($script:Data.Projects.ContainsKey($projectKey)) {
+            Write-Warning "Project $projectKey already exists!"
+            $overwrite = Read-Host "Overwrite? (Y/N)"
+            if ($overwrite -ne 'Y' -and $overwrite -ne 'y') {
+                return
+            }
+        }
+        
+        # Add any missing fields with defaults
+        if (-not $projectData.Status) { $projectData.Status = "Active" }
+        if (-not $projectData.Priority) { $projectData.Priority = "Medium" }
+        if (-not $projectData.BillingType) { $projectData.BillingType = "Non-Billable" }
+        
+        # Save project
+        $script:Data.Projects[$projectKey] = $projectData
+        Save-UnifiedData
+        
+        Write-Success "Project imported successfully!"
+        Write-Host "Project Key: $projectKey" -ForegroundColor $script:Data.Settings.Theme.Accent
+        if ($projectData.Name) {
+            Write-Host "Name: $($projectData.Name)" -ForegroundColor $script:Data.Settings.Theme.Accent
+        }
+        
+    } catch {
+        Write-Error "Failed to read Excel form: $_"
+        
+        # Cleanup on error
+        if ($excel) {
+            try {
+                $excel.Quit()
+                [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
+            } catch {}
+        }
+    }
+}
+
+function Configure-ExcelForm {
+    Write-Header "Configure Excel Form Mapping"
+    
+    Write-Host "Current worksheet name: $($script:Data.Settings.ExcelFormConfig.WorksheetName)"
+    $newName = Read-Host "New worksheet name (Enter to keep)"
+    if ($newName) {
+        $script:Data.Settings.ExcelFormConfig.WorksheetName = $newName
+    }
+    
+    Write-Host "`nConfigure field mappings:" -ForegroundColor Yellow
+    Write-Host "Format: LabelCell,ValueCell (e.g., A5,B5)" -ForegroundColor Gray
+    Write-Host "Enter blank to skip field" -ForegroundColor Gray
+    
+    foreach ($field in $script:Data.Settings.ExcelFormConfig.StandardFields.Keys) {
+        $current = $script:Data.Settings.ExcelFormConfig.StandardFields[$field]
+        Write-Host "`n$field ($($current.Label))" -ForegroundColor Cyan
+        Write-Host "Current: $($current.LabelCell),$($current.ValueCell)" -ForegroundColor Gray
+        
+        $input = Read-Host "New cells"
+        if ($input -match '^([A-Z]+\d+),([A-Z]+\d+)$') {
+            $script:Data.Settings.ExcelFormConfig.StandardFields[$field].LabelCell = $Matches[1]
+            $script:Data.Settings.ExcelFormConfig.StandardFields[$field].ValueCell = $Matches[2]
+        }
+    }
+    
+    Save-UnifiedData
+    Write-Success "Configuration saved!"
+}
+
+#endregion
+# Helper Functions Module
+# Utility functions for file I/O, date handling, validation, etc.
+
+#region Configuration
+
+$script:DataPath = Join-Path $env:USERPROFILE ".ProductivitySuite"
+$script:UnifiedDataFile = Join-Path $script:DataPath "unified_data.json"
+$script:ConfigFile = Join-Path $script:DataPath "config.json"
+$script:BackupPath = Join-Path $script:DataPath "backups"
+$script:ExcelCopyConfigFile = Join-Path $script:DataPath "excelcopy_configs.json"
+
+# Ensure directories exist
+@($script:DataPath, $script:BackupPath) | ForEach-Object {
+    if (-not (Test-Path $_)) {
+        New-Item -ItemType Directory -Path $_ -Force | Out-Null
+    }
+}
+
+#endregion
+
+#region Data Persistence
+
+function Load-UnifiedData {
+    try {
+        if (Test-Path $script:UnifiedDataFile) {
+            $loaded = Get-Content $script:UnifiedDataFile | ConvertFrom-Json -AsHashtable
+            
+            # Deep merge to preserve structure
+            foreach ($key in $loaded.Keys) {
+                if ($key -eq "Settings" -and $script:Data.ContainsKey($key)) {
+                    # Merge settings carefully to preserve defaults
+                    foreach ($settingKey in $loaded.Settings.Keys) {
+                        $script:Data.Settings[$settingKey] = $loaded.Settings[$settingKey]
+                    }
+                } else {
+                    $script:Data[$key] = $loaded[$key]
+                }
+            }
+            
+            # Ensure CurrentWeek is a DateTime
+            if ($script:Data.CurrentWeek -is [string]) {
+                $script:Data.CurrentWeek = [DateTime]::Parse($script:Data.CurrentWeek)
+            }
+        }
+    } catch {
+        Write-Warning "Could not load data, starting fresh: $_"
+    }
+}
+
+function Save-UnifiedData {
+    try {
+        # Auto-backup
+        if ((Get-Random -Maximum 10) -eq 0 -or -not (Test-Path $script:UnifiedDataFile)) {
+            Backup-Data -Silent
+        }
+        
+        $script:Data | ConvertTo-Json -Depth 10 | Set-Content $script:UnifiedDataFile
+    } catch {
+        Write-Error "Failed to save data: $_"
+    }
+}
+
+function Backup-Data {
+    param([switch]$Silent)
+    
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backupFile = Join-Path $script:BackupPath "backup_$timestamp.json"
+    
+    try {
+        $script:Data | ConvertTo-Json -Depth 10 | Set-Content $backupFile
+        if (-not $Silent) {
+            Write-Success "Backup created: $backupFile"
+        }
+        
+        # Keep only last 30 backups
+        Get-ChildItem $script:BackupPath -Filter "backup_*.json" |
+            Sort-Object CreationTime -Descending |
+            Select-Object -Skip 30 |
+            Remove-Item -Force
+    } catch {
+        Write-Error "Backup failed: $_"
+    }
+}
+
+function Restore-FromBackup {
+    Write-Header "Restore from Backup"
+    
+    $backups = Get-ChildItem $script:BackupPath -Filter "backup_*.json" | Sort-Object CreationTime -Descending
+    
+    if ($backups.Count -eq 0) {
+        Write-Warning "No backups found"
+        return
+    }
+    
+    Write-Host "Available backups:"
+    for ($i = 0; $i -lt $backups.Count; $i++) {
+        $backup = $backups[$i]
+        $date = $backup.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
+        $size = [Math]::Round($backup.Length / 1KB, 2)
+        Write-Host "  [$i] $date ($size KB)"
+    }
+    
+    $index = Read-Host "`nSelect backup number"
+    try {
+        $idx = [int]$index
+        if ($idx -ge 0 -and $idx -lt $backups.Count) {
+            $selectedBackup = $backups[$idx]
+            
+            Write-Warning "This will replace all current data! Type 'yes' to confirm"
+            $confirm = Read-Host
+            
+            if ($confirm -eq 'yes') {
+                # Backup current data first
+                Backup-Data -Silent
+                
+                # Load backup
+                $backupData = Get-Content $selectedBackup.FullName | ConvertFrom-Json -AsHashtable
+                $script:Data = $backupData
+                Save-UnifiedData
+                
+                Write-Success "Data restored from backup!"
+                Write-Info "A backup of your previous data was created."
+            }
+        }
+    } catch {
+        Write-Error "Invalid selection"
+    }
+}
+
+#endregion
+
+#region ID Generation
+
+function New-TodoId {
+    return [System.Guid]::NewGuid().ToString().Substring(0, 8)
+}
+
+function Format-Id2 {
+    param([string]$Id2)
+    
+    if ($Id2.Length -gt 9) {
+        $Id2 = $Id2.Substring(0, 9)
+    }
+    
+    $paddingNeeded = 12 - 2 - $Id2.Length
+    $zeros = "0" * $paddingNeeded
+    
+    return "V${zeros}${Id2}S"
+}
+
+#endregion
+
+#region Date Functions
+
+function Get-WeekStart {
+    param([DateTime]$Date = (Get-Date))
+    
+    $daysFromMonday = [int]$Date.DayOfWeek
+    if ($daysFromMonday -eq 0) { $daysFromMonday = 7 }
+    $monday = $Date.AddDays(1 - $daysFromMonday)
+    
+    return Get-Date $monday -Hour 0 -Minute 0 -Second 0
+}
+
+function Get-WeekDates {
+    param([DateTime]$WeekStart)
+    
+    return @(0..4 | ForEach-Object { $WeekStart.AddDays($_) })
+}
+
+function Format-TodoDate {
+    param($DateString)
+    if ([string]::IsNullOrEmpty($DateString)) { return "" }
+    try {
+        $date = [datetime]::Parse($DateString)
+        $today = [datetime]::Today
+        $diff = ($date - $today).Days
+        
+        $dateStr = $date.ToString("MMM dd")
+        if ($diff -eq 0) { return "Today" }
+        elseif ($diff -eq 1) { return "Tomorrow" }
+        elseif ($diff -eq -1) { return "Yesterday" }
+        elseif ($diff -gt 0 -and $diff -le 7) { return "$dateStr (in $diff days)" }
+        elseif ($diff -lt 0) {
+            $absDiff = [Math]::Abs($diff)
+            return "$dateStr ($absDiff days ago)"
+        }
+        else { return $dateStr }
+    }
+    catch { return $DateString }
+}
+
+function Get-NextWeekday {
+    param([int]$TargetDay)
+    
+    $today = [datetime]::Today
+    $currentDay = [int]$today.DayOfWeek
+    $daysToAdd = ($TargetDay - $currentDay + 7) % 7
+    if ($daysToAdd -eq 0) { $daysToAdd = 7 }
+    
+    return $today.AddDays($daysToAdd)
+}
+
+#endregion
+
+#region Validation Functions
+
+function Test-ExcelConnection {
+    Write-Header "Test Excel Connection"
+    
+    try {
+        Write-Info "Testing Excel COM object creation..."
+        $excel = New-Object -ComObject Excel.Application
+        Write-Success "Excel COM object created successfully!"
+        
+        Write-Info "Excel version: $($excel.Version)"
+        
+        $excel.Quit()
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($excel) | Out-Null
+        
+        Write-Success "Excel connection test passed!"
+    } catch {
+        Write-Error "Excel connection test failed: $_"
+        Write-Warning "Make sure Microsoft Excel is installed on this system."
+    }
+}
+
+#endregion
+
+#region Import/Export Functions
+
+function Export-AllData {
+    Write-Header "Export All Data"
+    
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $exportPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "ProductivitySuite_Export_$timestamp"
+    New-Item -ItemType Directory -Path $exportPath -Force | Out-Null
+    
+    # Export main data
+    $script:Data | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $exportPath "unified_data.json")
+    
+    # Export time entries as CSV
+    if ($script:Data.TimeEntries.Count -gt 0) {
+        $timeExport = $script:Data.TimeEntries | ForEach-Object {
+            $project = Get-ProjectOrTemplate $_.ProjectKey
+            [PSCustomObject]@{
+                Date = $_.Date
+                ProjectKey = $_.ProjectKey
+                ProjectName = $project.Name
+                Hours = $_.Hours
+                Description = $_.Description
+                TaskId = $_.TaskId
+                StartTime = $_.StartTime
+                EndTime = $_.EndTime
+            }
+        }
+        $timeExport | Export-Csv (Join-Path $exportPath "time_entries.csv") -NoTypeInformation
+    }
+    
+    # Export tasks as CSV
+    if ($script:Data.Tasks.Count -gt 0) {
+        $taskExport = $script:Data.Tasks | ForEach-Object {
+            $project = if ($_.ProjectKey) { Get-ProjectOrTemplate $_.ProjectKey } else { $null }
+            [PSCustomObject]@{
+                Id = $_.Id
+                Description = $_.Description
+                Priority = $_.Priority
+                Category = $_.Category
+                ProjectName = if ($project) { $project.Name } else { "" }
+                Status = Get-TaskStatus $_
+                DueDate = $_.DueDate
+                Progress = $_.Progress
+                TimeSpent = $_.TimeSpent
+                EstimatedTime = $_.EstimatedTime
+                Tags = $_.Tags -join ","
+            }
+        }
+        $taskExport | Export-Csv (Join-Path $exportPath "tasks.csv") -NoTypeInformation
+    }
+    
+    # Export projects as CSV
+    if ($script:Data.Projects.Count -gt 0) {
+        $projectExport = $script:Data.Projects.GetEnumerator() | ForEach-Object {
+            $proj = $_.Value
+            [PSCustomObject]@{
+                Key = $_.Key
+                Name = $proj.Name
+                Id1 = $proj.Id1
+                Id2 = $proj.Id2
+                Client = $proj.Client
+                Department = $proj.Department
+                Status = $proj.Status
+                BillingType = $proj.BillingType
+                Rate = $proj.Rate
+                Budget = $proj.Budget
+                TotalHours = $proj.TotalHours
+                ActiveTasks = $proj.ActiveTasks
+                CompletedTasks = $proj.CompletedTasks
+            }
+        }
+        $projectExport | Export-Csv (Join-Path $exportPath "projects.csv") -NoTypeInformation
+    }
+    
+    # Export command snippets
+    $commands = $script:Data.Tasks | Where-Object { $_.IsCommand -eq $true }
+    if ($commands.Count -gt 0) {
+        $commandExport = $commands | ForEach-Object {
+            [PSCustomObject]@{
+                Id = $_.Id
+                Name = $_.Description
+                Command = $_.Notes
+                Category = $_.Category
+                Tags = $_.Tags -join ","
+                Hotkey = if ($_.Hotkey) { $_.Hotkey } else { "" }
+                CreatedDate = $_.CreatedDate
+            }
+        }
+        $commandExport | Export-Csv (Join-Path $exportPath "command_snippets.csv") -NoTypeInformation
+    }
+    
+    Write-Success "Data exported to: $exportPath"
+    
+    # Open folder
+    Start-Process $exportPath
+}
+
+function Import-Data {
+    Write-Header "Import Data"
+    
+    Write-Warning "This will merge imported data with existing data."
+    Write-Host "Enter path to unified_data.json file:"
+    $importPath = Read-Host
+    
+    if (-not (Test-Path $importPath)) {
+        Write-Error "File not found!"
+        return
+    }
+    
+    try {
+        # Backup current data first
+        Backup-Data -Silent
+        
+        $importData = Get-Content $importPath | ConvertFrom-Json -AsHashtable
+        
+        Write-Host "`nImport options:"
+        Write-Host "[1] Merge with existing data"
+        Write-Host "[2] Replace all data"
+        Write-Host "[3] Cancel"
+        
+        $choice = Read-Host "Choice"
+        
+        switch ($choice) {
+            "1" {
+                # Merge data
+                if ($importData.Projects) {
+                    foreach ($key in $importData.Projects.Keys) {
+                        if (-not $script:Data.Projects.ContainsKey($key)) {
+                            $script:Data.Projects[$key] = $importData.Projects[$key]
+                            Write-Success "Imported project: $key"
+                        } else {
+                            Write-Warning "Skipped existing project: $key"
+                        }
+                    }
+                }
+                
+                if ($importData.Tasks) {
+                    $existingIds = $script:Data.Tasks | ForEach-Object { $_.Id }
+                    $imported = 0
+                    foreach ($task in $importData.Tasks) {
+                        if ($task.Id -notin $existingIds) {
+                            $script:Data.Tasks += $task
+                            $imported++
+                        }
+                    }
+                    Write-Success "Imported $imported new tasks"
+                }
+                
+                if ($importData.TimeEntries) {
+                    $existingIds = $script:Data.TimeEntries | ForEach-Object { $_.Id }
+                    $imported = 0
+                    foreach ($entry in $importData.TimeEntries) {
+                        if ($entry.Id -notin $existingIds) {
+                            $script:Data.TimeEntries += $entry
+                            $imported++
+                        }
+                    }
+                    Write-Success "Imported $imported new time entries"
+                }
+                
+                Save-UnifiedData
+                Write-Success "Data merge complete!"
+            }
+            "2" {
+                Write-Warning "Replace all data? Type 'yes' to confirm"
+                $confirm = Read-Host
+                if ($confirm -eq 'yes') {
+                    $script:Data = $importData
+                    Save-UnifiedData
+                    Write-Success "Data replaced successfully!"
+                }
+            }
+            "3" {
+                Write-Info "Import cancelled"
+            }
+        }
+    } catch {
+        Write-Error "Import failed: $_"
+    }
+}
+
+#endregion
+
+#region Reset Functions
+
+function Reset-ToDefaults {
+    Write-Header "Reset to Defaults"
+    
+    Write-Warning "This will reset all settings to defaults. Data will be preserved."
+    Write-Host "Type 'yes' to confirm:"
+    $confirm = Read-Host
+    
+    if ($confirm -eq 'yes') {
+        # Backup first
+        Backup-Data -Silent
+        
+        # Reset settings while preserving data
+        $script:Data.Settings = Get-DefaultSettings
+        
+        Save-UnifiedData
+        Initialize-ThemeSystem
+        
+        Write-Success "Settings reset to defaults!"
+    }
+}
+
+#endregion
+
+#region Clipboard Functions
+
+function Copy-ToClipboard {
+    param([string]$Text)
+    
+    try {
+        $Text | Set-Clipboard
+        return $true
+    } catch {
+        Write-Warning "Could not copy to clipboard: $_"
+        return $false
+    }
+}
+
+function Get-FromClipboard {
+    try {
+        return Get-Clipboard
+    } catch {
+        Write-Warning "Could not read from clipboard: $_"
+        return $null
+    }
+}
+
+#endregion
+# Unified Productivity Suite v5.0 - Main Entry Point
+# PowerShell 7.5+ Required
+
+#region Module Loading
+
+# Get script directory
+$script:ModuleRoot = $PSScriptRoot
+
+# Dot source modules in dependency order
+. "$script:ModuleRoot\theme.ps1"
+. "$script:ModuleRoot\helper.ps1"
+. "$script:ModuleRoot\ui.ps1"
+. "$script:ModuleRoot\core-data.ps1"
+. "$script:ModuleRoot\core-time.ps1"
+
+# Initialize systems
+Initialize-ThemeSystem
+Load-UnifiedData
+
+#endregion
+
+#region Quick Action System
+
+# Quick action map for +key shortcuts
+$script:QuickActionMap = @{
+    # Time actions
+    '9' = { Add-ManualTimeEntry; return $true }
+    'm' = { Add-ManualTimeEntry; return $true }
+    'time' = { Add-ManualTimeEntry; return $true }
+    's' = { Start-Timer; return $true }
+    'timer' = { Start-Timer; return $true }
+    'stop' = { Stop-Timer; return $true }
+    
+    # Task actions
+    'a' = { Add-TodoTask; return $true }
+    'task' = { Add-TodoTask; return $true }
+    'qa' = { 
+        $input = Read-Host "Quick add task"
+        Quick-AddTask -Input $input
+        return $true
+    }
+    
+    # View actions
+    'v' = { 
+        Show-ActiveTimers
+        Write-Host "`nPress any key to continue..."
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        return $true
+    }
+    't' = { Show-TasksViewMenu; return $true }
+    'today' = { Show-TodayView; return $true }
+    'w' = { 
+        Show-WeekReport
+        Write-Host "`nPress Enter to continue..."
+        Read-Host
+        return $true
+    }
+    'week' = { 
+        Show-WeekReport
+        Write-Host "`nPress Enter to continue..."
+        Read-Host
+        return $true
+    }
+    
+    # Project actions
+    'p' = { 
+        Show-ProjectDetail
+        Write-Host "`nPress Enter to continue..."
+        Read-Host
+        return $true
+    }
+    'projects' = { Show-ProjectsMenu; return $true }
+    
+    # Command snippets
+    'c' = { Manage-CommandSnippets; return $true }
+    'cmd' = { Manage-CommandSnippets; return $true }
+    'snippets' = { Manage-CommandSnippets; return $true }
+    
+    # Reports
+    'r' = { Show-ReportsMenu; return $true }
+    'export' = { Export-FormattedTimesheet; return $true }
+    'timesheet' = { Export-FormattedTimesheet; return $true }
+    
+    # Help
+    'h' = { Show-Help; return $true }
+    'help' = { Show-Help; return $true }
+    '?' = { Show-QuickActionHelp; return $true }
+}
+
+function Process-QuickAction {
+    param([string]$Key)
+    
+    $action = $script:QuickActionMap[$Key.ToLower()]
+    if ($action) {
+        return & $action
+    }
+    
+    # Check for partial matches
+    $matches = $script:QuickActionMap.Keys | Where-Object { $_ -like "$Key*" }
+    if ($matches.Count -eq 1) {
+        $action = $script:QuickActionMap[$matches[0]]
+        return & $action
+    } elseif ($matches.Count -gt 1) {
+        Write-Warning "Ambiguous quick action. Matches: $($matches -join ', ')"
+        return $true
+    }
+    
+    return $false
+}
+
+function Show-QuickActionHelp {
+    Write-Header "Quick Actions Help"
+    Write-Host "Use +key from any prompt to trigger quick actions:" -ForegroundColor Gray
+    Write-Host ""
+    
+    Write-Host "Time Management:" -ForegroundColor Yellow
+    Write-Host "  +9, +m, +time     Manual time entry"
+    Write-Host "  +s, +timer        Start timer"
+    Write-Host "  +stop             Stop timer"
+    Write-Host ""
+    
+    Write-Host "Task Management:" -ForegroundColor Yellow
+    Write-Host "  +a, +task         Add task"
+    Write-Host "  +qa               Quick add task"
+    Write-Host "  +t                Today's tasks"
+    Write-Host ""
+    
+    Write-Host "Views & Reports:" -ForegroundColor Yellow
+    Write-Host "  +v                View active timers"
+    Write-Host "  +w, +week         Week report"
+    Write-Host "  +today            Today view"
+    Write-Host "  +timesheet        Export formatted timesheet"
+    Write-Host ""
+    
+    Write-Host "Other:" -ForegroundColor Yellow
+    Write-Host "  +p                Project details"
+    Write-Host "  +c, +cmd          Command snippets"
+    Write-Host "  +h, +help         Main help"
+    Write-Host "  +?                This quick action help"
+    
+    Write-Host "`nPress any key to continue..."
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+#endregion
+
+#region Menu Structure
+
+$script:MenuStructure = @{
+    "Time Management" = @{
+        Header = "Time Management"
+        Options = @(
+            @{Key="1"; Label="Manual Time Entry (Preferred)"; Action={Add-ManualTimeEntry}}
+            @{Key="2"; Label="Start Timer"; Action={Start-Timer}}
+            @{Key="3"; Label="Stop Timer"; Action={Stop-Timer}}
+            @{Key="4"; Label="View Active Timers"; Action={
+                Show-ActiveTimers
+                Write-Host "`nPress any key to continue..."
+                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            }}
+            @{Key="5"; Label="Quick Time Entry"; Action={
+                Write-Host "Enter: PROJECT HOURS [DESCRIPTION]" -ForegroundColor Gray
+                $input = Read-Host "Quick entry"
+                Quick-TimeEntry $input
+            }}
+            @{Key="6"; Label="Edit Time Entry"; Action={Edit-TimeEntry}}
+            @{Key="7"; Label="Delete Time Entry"; Action={Delete-TimeEntry}}
+            @{Key="8"; Label="Today's Time Log"; Action={Show-TodayTimeLog}}
+            @{Key="9"; Label="Export Formatted Timesheet"; Action={Export-FormattedTimesheet}}
+        )
+    }
+    
+    "Task Management" = @{
+        Header = "Task Management"
+        Action = {Show-TaskManagementMenu}  # Special handling for task menu
+    }
+    
+    "Reports & Analytics" = @{
+        Header = "Reports & Analytics"
+        Options = @(
+            @{Key="1"; Label="Week Report (Tab-delimited)"; Action={Show-WeekReport}}
+            @{Key="2"; Label="Extended Week Report"; Action={Show-ExtendedReport}}
+            @{Key="3"; Label="Month Summary"; Action={Show-MonthSummary}}
+            @{Key="4"; Label="Project Summary"; Action={Show-ProjectSummary}}
+            @{Key="5"; Label="Task Analytics"; Action={Show-TaskAnalytics}}
+            @{Key="6"; Label="Time Analytics"; Action={Show-TimeAnalytics}}
+            @{Key="7"; Label="Export Data"; Action={Export-AllData}}
+            @{Key="8"; Label="Formatted Timesheet"; Action={Export-FormattedTimesheet}}
+            @{Key="9"; Label="Change Report Week"; Action={Change-ReportWeek}}
+        )
+    }
+    
+    "Projects & Clients" = @{
+        Header = "Projects & Clients"
+        Options = @(
+            @{Key="1"; Label="Add Project"; Action={Add-Project}}
+            @{Key="2"; Label="Import from Excel"; Action={Import-ProjectFromExcel}}
+            @{Key="3"; Label="View Project Details"; Action={Show-ProjectDetail}}
+            @{Key="4"; Label="Edit Project"; Action={Edit-Project}}
+            @{Key="5"; Label="Configure Excel Form"; Action={Configure-ExcelForm}}
+            @{Key="6"; Label="Batch Import Projects"; Action={Batch-ImportProjects}}
+            @{Key="7"; Label="Export Projects"; Action={Export-Projects}}
+        )
+    }
+    
+    "Tools & Utilities" = @{
+        Header = "Tools & Utilities"
+        Options = @(
+            @{Key="1"; Label="Command Snippets"; Action={Manage-CommandSnippets}}
+            @{Key="2"; Label="Excel Copy Jobs"; Action={Show-ExcelIntegrationMenu}}
+            @{Key="3"; Label="Quick Actions Help"; Action={Show-QuickActionHelp}}
+            @{Key="4"; Label="Backup Data"; Action={
+                Backup-Data
+                Write-Host "`nPress Enter to continue..."
+                Read-Host
+            }}
+            @{Key="5"; Label="Test Excel Connection"; Action={Test-ExcelConnection}}
+        )
+    }
+    
+    "Settings & Config" = @{
+        Header = "Settings & Configuration"
+        Options = @(
+            @{Key="1"; Label="Time Tracking Settings"; Action={Edit-TimeTrackingSettings}}
+            @{Key="2"; Label="Task Settings"; Action={Edit-TaskSettings}}
+            @{Key="3"; Label="Excel Form Configuration"; Action={Configure-ExcelForm}}
+            @{Key="4"; Label="Theme Settings"; Action={Edit-ThemeSettings}}
+            @{Key="5"; Label="Command Snippet Settings"; Action={Edit-CommandSnippetSettings}}
+            @{Key="6"; Label="Export All Data"; Action={Export-AllData}}
+            @{Key="7"; Label="Import Data"; Action={Import-Data}}
+            @{Key="8"; Label="Reset to Defaults"; Action={Reset-ToDefaults}}
+        )
+    }
+}
+
+#endregion
+
+#region Main Functions
+
+function Show-Menu {
+    param($MenuConfig)
+    
+    Write-Header $MenuConfig.Header
+    
+    if ($MenuConfig.Options) {
+        foreach ($option in $MenuConfig.Options) {
+            Write-Host "[$($option.Key)] $($option.Label)"
+        }
+        Write-Host "`n[B] Back to Dashboard"
+        
+        $choice = Read-Host "`nChoice"
+        
+        if ($choice -eq 'B' -or $choice -eq 'b') {
+            return $true
+        }
+        
+        $selected = $MenuConfig.Options | Where-Object { $_.Key -eq $choice }
+        if ($selected) {
+            & $selected.Action
+            if ($choice -ne "B" -and $choice -ne "b") {
+                Write-Host "`nPress Enter to continue..."
+                Read-Host
+            }
+        }
+        
+        return $false
+    }
+}
+
+function Show-MainMenu {
+    while ($true) {
+        Show-Dashboard
+        
+        Write-Host "`nCommand: " -NoNewline -ForegroundColor Yellow
+        $choice = Read-Host
+        
+        # Handle quick actions
+        if ($choice -match '^\+(.+)$') {
+            if (Process-QuickAction $matches[1]) {
+                continue
+            } else {
+                Write-Warning "Unknown quick action: +$($matches[1]). Use +? for help."
+                Start-Sleep -Seconds 1
+                continue
+            }
+        }
+        
+        # Handle direct commands
+        switch ($choice.ToUpper()) {
+            # Quick keys (dashboard shortcuts)
+            "M" { Add-ManualTimeEntry }
+            "S" { Start-Timer }
+            "A" { Add-TodoTask }
+            "V" {
+                Show-ActiveTimers
+                Write-Host "`nPress any key to continue..."
+                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            }
+            "T" { Show-TodayView }
+            "W" {
+                Show-WeekReport
+                Write-Host "`nPress Enter to continue..."
+                Read-Host
+            }
+            "P" {
+                Show-ProjectDetail
+                Write-Host "`nPress Enter to continue..."
+                Read-Host
+            }
+            "H" { Show-Help }
+            
+            # Menu numbers
+            "1" {
+                while ($true) {
+                    if (Show-Menu $script:MenuStructure["Time Management"]) { break }
+                }
+            }
+            "2" { Show-TaskManagementMenu }
+            "3" {
+                while ($true) {
+                    if (Show-Menu $script:MenuStructure["Reports & Analytics"]) { break }
+                }
+            }
+            "4" {
+                while ($true) {
+                    Show-ProjectsAndTemplates
+                    Write-Host ""
+                    if (Show-Menu $script:MenuStructure["Projects & Clients"]) { break }
+                }
+            }
+            "5" {
+                while ($true) {
+                    if (Show-Menu $script:MenuStructure["Tools & Utilities"]) { break }
+                }
+            }
+            "6" {
+                while ($true) {
+                    Show-CurrentSettings
+                    if (Show-Menu $script:MenuStructure["Settings & Config"]) { break }
+                }
+            }
+            
+            # Quit
+            "Q" {
+                # Save any active timers info before quitting
+                if ($script:Data.ActiveTimers.Count -gt 0) {
+                    Write-Warning "You have $($script:Data.ActiveTimers.Count) active timer(s) running!"
+                    Write-Host "Stop all timers before quitting? (Y/N)"
+                    $stopTimers = Read-Host
+                    if ($stopTimers -eq 'Y' -or $stopTimers -eq 'y') {
+                        foreach ($key in @($script:Data.ActiveTimers.Keys)) {
+                            Stop-SingleTimer -Key $key
+                        }
+                    }
+                }
+                
+                Save-UnifiedData
+                Write-Host "`n👋 Thanks for using Unified Productivity Suite!" -ForegroundColor Cyan
+                Write-Host "Stay productive! 🚀" -ForegroundColor Yellow
+                return
+            }
+            
+            default {
+                # Check for quick commands
+                if ($choice -match '^q\s+(.+)') {
+                    Quick-TimeEntry $choice.Substring(2)
+                }
+                elseif ($choice -match '^qa\s+(.+)') {
+                    Quick-AddTask -Input $choice.Substring(3)
+                }
+                elseif (-not [string]::IsNullOrEmpty($choice)) {
+                    Write-Warning "Unknown command. Press [H] for help or +? for quick actions."
+                    Start-Sleep -Seconds 1
+                }
+            }
+        }
+    }
+}
+
+function Show-TodayView {
+    Clear-Host
+    Write-Header "Today's Overview"
+    
+    $today = [DateTime]::Today
+    $todayStr = $today.ToString("yyyy-MM-dd")
+    
+    # Today's time entries
+    $todayEntries = $script:Data.TimeEntries | Where-Object { $_.Date -eq $todayStr }
+    $todayHours = ($todayEntries | Measure-Object -Property Hours -Sum).Sum
+    $todayHours = if ($todayHours) { [Math]::Round($todayHours, 2) } else { 0 }
+    
+    Write-Host "📅 " -NoNewline
+    Write-Host $today.ToString("dddd, MMMM dd, yyyy") -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Time summary
+    Write-Host "⏱️  TIME LOGGED: " -NoNewline -ForegroundColor Yellow
+    Write-Host "$todayHours hours" -NoNewline
+    $targetHours = $script:Data.Settings.HoursPerDay
+    $percent = if ($targetHours -gt 0) { [Math]::Round(($todayHours / $targetHours) * 100, 0) } else { 0 }
+    Write-Host " ($percent% of $targetHours hour target)" -ForegroundColor Gray
+    
+    # Active timers
+    if ($script:Data.ActiveTimers.Count -gt 0) {
+        Write-Host "`n⏰ ACTIVE TIMERS:" -ForegroundColor Red
+        foreach ($timer in $script:Data.ActiveTimers.GetEnumerator()) {
+            $elapsed = (Get-Date) - [DateTime]$timer.Value.StartTime
+            $project = Get-ProjectOrTemplate $timer.Value.ProjectKey
+            Write-Host "   → $($project.Name): $([Math]::Floor($elapsed.TotalHours)):$($elapsed.ToString('mm\:ss'))" -ForegroundColor Cyan
+        }
+    }
+    
+    # Today's tasks
+    $todayTasks = $script:Data.Tasks | Where-Object {
+        (-not $_.Completed) -and
+        ($_.DueDate -and ([DateTime]::Parse($_.DueDate).Date -eq $today))
+    }
+    
+    $overdueTasks = $script:Data.Tasks | Where-Object {
+        (-not $_.Completed) -and
+        ($_.DueDate -and ([DateTime]::Parse($_.DueDate) -lt $today))
+    }
+    
+    if ($overdueTasks.Count -gt 0) {
+        Write-Host "`n⚠️  OVERDUE TASKS ($($overdueTasks.Count)):" -ForegroundColor Red
+        foreach ($task in $overdueTasks | Sort-Object DueDate, Priority | Select-Object -First 5) {
+            Show-TaskItemCompact $task
+        }
+        if ($overdueTasks.Count -gt 5) {
+            Write-Host "   ... and $($overdueTasks.Count - 5) more" -ForegroundColor DarkGray
+        }
+    }
+    
+    if ($todayTasks.Count -gt 0) {
+        Write-Host "`n📋 TODAY'S TASKS ($($todayTasks.Count)):" -ForegroundColor Yellow
+        foreach ($task in $todayTasks | Sort-Object Priority) {
+            Show-TaskItemCompact $task
+        }
+    } elseif ($overdueTasks.Count -eq 0) {
+        Write-Host "`n✅ No tasks due today!" -ForegroundColor Green
+    }
+    
+    # In progress tasks
+    $inProgressTasks = $script:Data.Tasks | Where-Object {
+        (-not $_.Completed) -and ($_.Progress -gt 0) -and ($_.Progress -lt 100)
+    }
+    
+    if ($inProgressTasks.Count -gt 0) {
+        Write-Host "`n🔄 IN PROGRESS ($($inProgressTasks.Count)):" -ForegroundColor Blue
+        foreach ($task in $inProgressTasks | Sort-Object -Descending Progress | Select-Object -First 3) {
+            Show-TaskItemCompact $task
+            $progressBar = "[" + ("█" * [math]::Floor($task.Progress / 10)) + ("░" * (10 - [math]::Floor($task.Progress / 10))) + "]"
+            Write-Host "      $progressBar $($task.Progress)%" -ForegroundColor Green
+        }
+    }
+    
+    # Recent command snippets
+    $recentCommands = Get-RecentCommandSnippets -Count 3
+    if ($recentCommands.Count -gt 0) {
+        Write-Host "`n💡 RECENT COMMANDS:" -ForegroundColor Magenta
+        foreach ($cmd in $recentCommands) {
+            Write-Host "   [$($cmd.Id.Substring(0,6))] $($cmd.Description)" -ForegroundColor White
+            if ($cmd.Hotkey) {
+                Write-Host "         Hotkey: $($cmd.Hotkey)" -ForegroundColor Gray
+            }
+        }
+    }
+    
+    Write-Host "`nPress any key to continue..."
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+function Show-TaskItemCompact {
+    param($Task)
+    
+    $priorityInfo = Get-PriorityInfo $Task.Priority
+    Write-Host "   $($priorityInfo.Icon) " -NoNewline
+    
+    if ($Task.Completed) {
+        Write-Host "[$($Task.Id.Substring(0,6))] $($Task.Description)" -ForegroundColor DarkGray
+    } else {
+        $status = Get-TaskStatus $Task
+        $color = switch ($status) {
+            "Overdue" { "Red" }
+            "Due Today" { "Yellow" }
+            "Due Soon" { "Cyan" }
+            "In Progress" { "Blue" }
+            default { "White" }
+        }
+        Write-Host "[$($Task.Id.Substring(0,6))] $($Task.Description)" -ForegroundColor $color
+    }
+    
+    if ($Task.ProjectKey) {
+        $project = Get-ProjectOrTemplate $Task.ProjectKey
+        if ($project) {
+            Write-Host "      Project: $($project.Name)" -ForegroundColor Gray
+        }
+    }
+}
+
+function Change-ReportWeek {
+    Write-Host "[P]revious, [N]ext, [T]his week, or enter date (YYYY-MM-DD): " -NoNewline
+    $nav = Read-Host
+    
+    switch ($nav.ToUpper()) {
+        'P' { $script:Data.CurrentWeek = $script:Data.CurrentWeek.AddDays(-7) }
+        'N' { $script:Data.CurrentWeek = $script:Data.CurrentWeek.AddDays(7) }
+        'T' { $script:Data.CurrentWeek = Get-WeekStart }
+        default {
+            try {
+                $date = [DateTime]::Parse($nav)
+                $script:Data.CurrentWeek = Get-WeekStart $date
+            } catch {
+                Write-Error "Invalid date format"
+                return
+            }
+        }
+    }
+    Save-UnifiedData
+    Write-Success "Report week changed to: $($script:Data.CurrentWeek.ToString('yyyy-MM-dd'))"
+}
+
+function Show-CurrentSettings {
+    Write-Host "Current Settings:" -ForegroundColor Yellow
+    Write-Host "  Default Rate:        `$$($script:Data.Settings.DefaultRate)/hour"
+    Write-Host "  Hours per Day:       $($script:Data.Settings.HoursPerDay)"
+    Write-Host "  Days per Week:       $($script:Data.Settings.DaysPerWeek)"
+    Write-Host "  Default Priority:    $($script:Data.Settings.DefaultPriority)"
+    Write-Host "  Default Category:    $($script:Data.Settings.DefaultCategory)"
+    Write-Host "  Show Completed Days: $($script:Data.Settings.ShowCompletedDays)"
+    Write-Host "  Auto-Archive Days:   $($script:Data.Settings.AutoArchiveDays)"
+    if ($script:Data.Settings.CommandSnippets) {
+        Write-Host "  Snippet Hotkeys:     $(if ($script:Data.Settings.CommandSnippets.EnableHotkeys) { 'Enabled' } else { 'Disabled' })"
+        Write-Host "  Auto-Copy Snippets:  $(if ($script:Data.Settings.CommandSnippets.AutoCopyToClipboard) { 'Yes' } else { 'No' })"
+    }
+}
+
+function Start-UnifiedProductivitySuite {
+    Write-Host "Unified Productivity Suite v5.0" -ForegroundColor Cyan
+    Write-Host "Initializing..." -ForegroundColor Gray
+    
+    # Show quick action tip on first run
+    if (-not $script:Data.Settings.QuickActionTipShown) {
+        Write-Host "`nTIP: Use +key shortcuts from any prompt for quick actions!" -ForegroundColor Yellow
+        Write-Host "     Try +? to see all available quick actions." -ForegroundColor Gray
+        $script:Data.Settings.QuickActionTipShown = $true
+        Save-UnifiedData
+        Start-Sleep -Seconds 2
+    }
+    
+    Show-MainMenu
+}
+
+#endregion
+
+# Entry point
+Start-UnifiedProductivitySuite
+# Theme System Module
+# Handles colors, styles, and visual presentation
+
+#region Border Styles
+
+$Global:borderStyles = @{
+    None = @{
+        TopLeft     = " "
+        TopRight    = " "
+        BottomLeft  = " "
+        BottomRight = " "
+        Horizontal  = " "
+        Vertical    = " "
+        Cross       = " "
+        TLeft       = " "
+        TRight      = " "
+        TTop        = " "
+        TBottom     = " "
+    }
+    Single = @{
+        TopLeft     = "┌"
+        TopRight    = "┐"
+        BottomLeft  = "└"
+        BottomRight = "┘"
+        Horizontal  = "─"
+        Vertical    = "│"
+        Cross       = "┼"
+        TLeft       = "├"
+        TRight      = "┤"
+        TTop        = "┬"
+        TBottom     = "┴"
+    }
+    Double = @{
+        TopLeft     = "╔"
+        TopRight    = "╗"
+        BottomLeft  = "╚"
+        BottomRight = "╝"
+        Horizontal  = "═"
+        Vertical    = "║"
+        Cross       = "╬"
+        TLeft       = "╠"
+        TRight      = "╣"
+        TTop        = "╦"
+        TBottom     = "╩"
+    }
+    Rounded = @{
+        TopLeft     = "╭"
+        TopRight    = "╮"
+        BottomLeft  = "╰"
+        BottomRight = "╯"
+        Horizontal  = "─"
+        Vertical    = "│"
+        Cross       = "┼"
+        TLeft       = "├"
+        TRight      = "┤"
+        TTop        = "┬"
+        TBottom     = "┴"
+    }
+    Heavy = @{
+        TopLeft     = "┏"
+        TopRight    = "┓"
+        BottomLeft  = "┗"
+        BottomRight = "┛"
+        Horizontal  = "━"
+        Vertical    = "┃"
+        Cross       = "╋"
+        TLeft       = "┣"
+        TRight      = "┫"
+        TTop        = "┳"
+        TBottom     = "┻"
+    }
+}
+
+#endregion
+
+#region Theme Management
+
+# Default theme structure
+$script:DefaultTheme = @{
+    Name = "Default"
+    Description = "Clean default theme"
+    Palette = @{
+        PrimaryFG = "#FFFFFF"
+        SecondaryFG = "#808080"
+        AccentFG = "#00D7FF"
+        SuccessFG = "#5FFF87"
+        ErrorFG = "#FF005F"
+        WarningFG = "#FFFF00"
+        InfoFG = "#5FD7FF"
+        HeaderFG = "#00D7FF"
+        SubtleFG = "#808080"
+    }
+    DataTable = @{
+        BorderStyle = "Single"
+        BorderFG = "#FFFFFF"
+        Pad = 1
+        Header = @{
+            FG = "#00D7FF"
+            BG = $null
+            Separator = $true
+            Case = "Default"
+        }
+        DataRow = @{
+            FG = "#FFFFFF"
+            BG = $null
+        }
+        AltRow = @{
+            FG = "#808080"
+            BG = $null
+        }
+        Highlight = @{
+            Overdue = @{FG = "#FF005F"}
+            DueSoon = @{FG = "#FFFF00"}
+            Completed = @{FG = "#808080"}
+            Selected = @{FG = "#000000"; BG = "#00D7FF"}
+        }
+    }
+}
+
+# Current theme storage
+$script:CurrentTheme = $null
+
+function Initialize-ThemeSystem {
+    # Load theme from settings or use default
+    if ($script:Data -and $script:Data.Settings -and $script:Data.Settings.Theme) {
+        # For now, just use the legacy theme colors
+        $script:CurrentTheme = @{
+            Name = "Legacy"
+            Description = "Legacy theme from settings"
+            Palette = @{
+                PrimaryFG = "#FFFFFF"
+                SecondaryFG = "#808080"
+                AccentFG = $(Get-ConsoleColorHex $script:Data.Settings.Theme.Accent)
+                SuccessFG = $(Get-ConsoleColorHex $script:Data.Settings.Theme.Success)
+                ErrorFG = $(Get-ConsoleColorHex $script:Data.Settings.Theme.Error)
+                WarningFG = $(Get-ConsoleColorHex $script:Data.Settings.Theme.Warning)
+                InfoFG = $(Get-ConsoleColorHex $script:Data.Settings.Theme.Info)
+                HeaderFG = $(Get-ConsoleColorHex $script:Data.Settings.Theme.Header)
+                SubtleFG = $(Get-ConsoleColorHex $script:Data.Settings.Theme.Subtle)
+            }
+            DataTable = $script:DefaultTheme.DataTable
+        }
+    } else {
+        $script:CurrentTheme = $script:DefaultTheme
+    }
+}
+
+function Get-ConsoleColorHex {
+    param($ColorName)
+    
+    $colorMap = @{
+        "Black" = "#000000"
+        "DarkBlue" = "#000080"
+        "DarkGreen" = "#008000"
+        "DarkCyan" = "#008080"
+        "DarkRed" = "#800000"
+        "DarkMagenta" = "#800080"
+        "DarkYellow" = "#808000"
+        "Gray" = "#C0C0C0"
+        "DarkGray" = "#808080"
+        "Blue" = "#0000FF"
+        "Green" = "#00FF00"
+        "Cyan" = "#00FFFF"
+        "Red" = "#FF0000"
+        "Magenta" = "#FF00FF"
+        "Yellow" = "#FFFF00"
+        "White" = "#FFFFFF"
+    }
+    
+    if ($colorMap.ContainsKey($ColorName)) {
+        return $colorMap[$ColorName]
+    }
+    return "#FFFFFF"
+}
+
+function Get-BorderStyleChars {
+    param(
+        [string]$Style = "Single"
+    )
+    
+    if ($Global:borderStyles.ContainsKey($Style)) {
+        return $Global:borderStyles[$Style]
+    }
+    return $Global:borderStyles.Single
+}
+
+function Get-ThemeProperty {
+    param(
+        [string]$Path
+    )
+    
+    $parts = $Path -split '\.'
+    $current = $script:CurrentTheme
+    
+    foreach ($part in $parts) {
+        if ($current -is [hashtable] -and $current.ContainsKey($part)) {
+            $current = $current[$part]
+        } else {
+            return $null
+        }
+    }
+    
+    return $current
+}
+
+#endregion
+
+#region PSStyle Support
+
+function Get-PSStyleValue {
+    param(
+        [string]$FG,
+        [string]$BG,
+        [switch]$Bold,
+        [switch]$Italic,
+        [switch]$Underline
+    )
+    
+    # For PowerShell 7.2+ with PSStyle support
+    if ($PSVersionTable.PSVersion.Major -ge 7 -and $PSVersionTable.PSVersion.Minor -ge 2) {
+        $style = ""
+        
+        if ($FG) {
+            if ($FG -match '^#[0-9A-Fa-f]{6}$') {
+                $style += "`e[38;2;$([Convert]::ToInt32($FG.Substring(1,2), 16));$([Convert]::ToInt32($FG.Substring(3,2), 16));$([Convert]::ToInt32($FG.Substring(5,2), 16))m"
+            }
+        }
+        
+        if ($BG) {
+            if ($BG -match '^#[0-9A-Fa-f]{6}$') {
+                $style += "`e[48;2;$([Convert]::ToInt32($BG.Substring(1,2), 16));$([Convert]::ToInt32($BG.Substring(3,2), 16));$([Convert]::ToInt32($BG.Substring(5,2), 16))m"
+            }
+        }
+        
+        if ($Bold) { $style += "`e[1m" }
+        if ($Italic) { $style += "`e[3m" }
+        if ($Underline) { $style += "`e[4m" }
+        
+        return $style
+    }
+    
+    return ""
+}
+
+function Apply-PSStyle {
+    param(
+        [string]$Text,
+        [string]$FG,
+        [string]$BG,
+        [switch]$Bold,
+        [switch]$Italic,
+        [switch]$Underline
+    )
+    
+    $style = Get-PSStyleValue -FG $FG -BG $BG -Bold:$Bold -Italic:$Italic -Underline:$Underline
+    
+    if ($style) {
+        return "${style}${Text}`e[0m"
+    }
+    
+    return $Text
+}
+
+#endregion
+
+#region Theme-Based UI Functions
+
+function Write-Header {
+    param([string]$Text)
+    
+    # Use legacy color if available, otherwise use theme
+    if ($script:Data -and $script:Data.Settings -and $script:Data.Settings.Theme) {
+        Write-Host "`n$Text" -ForegroundColor $script:Data.Settings.Theme.Header
+        Write-Host ("=" * $Text.Length) -ForegroundColor DarkCyan
+    } else {
+        $headerColor = Get-ThemeProperty "Palette.HeaderFG"
+        if ($headerColor) {
+            Write-Host "`n$(Apply-PSStyle -Text $Text -FG $headerColor -Bold)"
+            Write-Host ("=" * $Text.Length) -ForegroundColor DarkCyan
+        } else {
+            Write-Host "`n$Text" -ForegroundColor Cyan
+            Write-Host ("=" * $Text.Length) -ForegroundColor DarkCyan
+        }
+    }
+}
+
+function Write-Success {
+    param([string]$Text)
+    
+    if ($script:Data -and $script:Data.Settings -and $script:Data.Settings.Theme) {
+        Write-Host "✓ $Text" -ForegroundColor $script:Data.Settings.Theme.Success
+    } else {
+        $color = Get-ThemeProperty "Palette.SuccessFG"
+        if ($color) {
+            Write-Host "$(Apply-PSStyle -Text "✓ $Text" -FG $color)"
+        } else {
+            Write-Host "✓ $Text" -ForegroundColor Green
+        }
+    }
+}
+
+function Write-Warning {
+    param([string]$Text)
+    
+    if ($script:Data -and $script:Data.Settings -and $script:Data.Settings.Theme) {
+        Write-Host "⚠ $Text" -ForegroundColor $script:Data.Settings.Theme.Warning
+    } else {
+        $color = Get-ThemeProperty "Palette.WarningFG"
+        if ($color) {
+            Write-Host "$(Apply-PSStyle -Text "⚠ $Text" -FG $color)"
+        } else {
+            Write-Host "⚠ $Text" -ForegroundColor Yellow
+        }
+    }
+}
+
+function Write-Error {
+    param([string]$Text)
+    
+    if ($script:Data -and $script:Data.Settings -and $script:Data.Settings.Theme) {
+        Write-Host "✗ $Text" -ForegroundColor $script:Data.Settings.Theme.Error
+    } else {
+        $color = Get-ThemeProperty "Palette.ErrorFG"
+        if ($color) {
+            Write-Host "$(Apply-PSStyle -Text "✗ $Text" -FG $color)"
+        } else {
+            Write-Host "✗ $Text" -ForegroundColor Red
+        }
+    }
+}
+
+function Write-Info {
+    param([string]$Text)
+    
+    if ($script:Data -and $script:Data.Settings -and $script:Data.Settings.Theme) {
+        Write-Host "ℹ $Text" -ForegroundColor $script:Data.Settings.Theme.Info
+    } else {
+        $color = Get-ThemeProperty "Palette.InfoFG"
+        if ($color) {
+            Write-Host "$(Apply-PSStyle -Text "ℹ $Text" -FG $color)"
+        } else {
+            Write-Host "ℹ $Text" -ForegroundColor Blue
+        }
+    }
+}
+
+#endregion
+
+#region Theme Configuration
+
+function Edit-ThemeSettings {
+    Write-Header "Theme Settings"
+    
+    Write-Host "Current theme colors:" -ForegroundColor Yellow
+    Write-Host "  Header:  " -NoNewline; Write-Host "Sample" -ForegroundColor $script:Data.Settings.Theme.Header
+    Write-Host "  Success: " -NoNewline; Write-Host "Sample" -ForegroundColor $script:Data.Settings.Theme.Success
+    Write-Host "  Warning: " -NoNewline; Write-Host "Sample" -ForegroundColor $script:Data.Settings.Theme.Warning
+    Write-Host "  Error:   " -NoNewline; Write-Host "Sample" -ForegroundColor $script:Data.Settings.Theme.Error
+    Write-Host "  Info:    " -NoNewline; Write-Host "Sample" -ForegroundColor $script:Data.Settings.Theme.Info
+    Write-Host "  Accent:  " -NoNewline; Write-Host "Sample" -ForegroundColor $script:Data.Settings.Theme.Accent
+    Write-Host "  Subtle:  " -NoNewline; Write-Host "Sample" -ForegroundColor $script:Data.Settings.Theme.Subtle
+    
+    Write-Host "`nAvailable colors:" -ForegroundColor Gray
+    Write-Host "Black, DarkBlue, DarkGreen, DarkCyan, DarkRed, DarkMagenta, DarkYellow, Gray,"
+    Write-Host "DarkGray, Blue, Green, Cyan, Red, Magenta, Yellow, White"
+    
+    Write-Host "`nLeave empty to keep current color" -ForegroundColor Gray
+    
+    $colors = @("Header", "Success", "Warning", "Error", "Info", "Accent", "Subtle")
+    foreach ($colorType in $colors) {
+        $newColor = Read-Host "$colorType color"
+        if ($newColor) {
+            $script:Data.Settings.Theme[$colorType] = $newColor
+        }
+    }
+    
+    Save-UnifiedData
+    Initialize-ThemeSystem
+    Write-Success "Theme settings updated!"
+}
+
+#endregion
+# UI Components Module
+# Tables, menus, borders, and display functions
+
+#region Table Formatting
+
+function Format-TableUnicode {
+    param(
+        [Parameter(ValueFromPipeline)]
+        [object[]]$Data,
+        
+        [hashtable[]]$Columns,
+        
+        [string]$BorderStyle = "Single",
+        [string]$Title = "",
+        [switch]$NoHeader,
+        [switch]$Wrap,
+        [int]$MaxWidth = 0,
+        [hashtable]$RowColors = @{},
+        [scriptblock]$RowColorCondition
+    )
+    
+    begin {
+        $allData = @()
+        $border = Get-BorderStyleChars -Style $BorderStyle
+    }
+    
+    process {
+        $allData += $Data
+    }
+    
+    end {
+        if ($allData.Count -eq 0) {
+            Write-Host "No data to display" -ForegroundColor Gray
+            return
+        }
+        
+        # Auto-generate columns if not provided
+        if (-not $Columns) {
+            $props = $allData[0].PSObject.Properties | Where-Object { $_.MemberType -eq 'NoteProperty' }
+            $Columns = $props | ForEach-Object {
+                @{
+                    Name = $_.Name
+                    Title = $_.Name
+                    Width = 0  # Auto-size
+                }
+            }
+        }
+        
+        # Calculate column widths
+        foreach ($col in $Columns) {
+            if ($col.Width -eq 0) {
+                # Auto-size column
+                $maxLen = $col.Title.Length
+                foreach ($item in $allData) {
+                    $value = Get-PropertyValue $item $col.Name
+                    $len = $value.ToString().Length
+                    if ($len -gt $maxLen) { $maxLen = $len }
+                }
+                $col.Width = [Math]::Min($maxLen + 2, 50)  # Cap at 50 chars
+            }
+        }
+        
+        # Calculate total width
+        $totalWidth = ($Columns | Measure-Object -Property Width -Sum).Sum + ($Columns.Count + 1)
+        
+        if ($MaxWidth -gt 0 -and $totalWidth -gt $MaxWidth) {
+            # Adjust widths proportionally
+            $factor = $MaxWidth / $totalWidth
+            foreach ($col in $Columns) {
+                $col.Width = [Math]::Max([int]($col.Width * $factor), 5)
+            }
+            $totalWidth = $MaxWidth
+        }
+        
+        # Draw top border
+        Write-Host $border.TopLeft -NoNewline
+        for ($i = 0; $i -lt $Columns.Count; $i++) {
+            Write-Host ($border.Horizontal * $Columns[$i].Width) -NoNewline
+            if ($i -lt $Columns.Count - 1) {
+                Write-Host $border.TTop -NoNewline
+            }
+        }
+        Write-Host $border.TopRight
+        
+        # Draw title if provided
+        if ($Title) {
+            Write-Host $border.Vertical -NoNewline
+            $titlePadded = " $Title ".PadRight($totalWidth - 2)
+            Write-Host $titlePadded -NoNewline -ForegroundColor Cyan
+            Write-Host $border.Vertical
+            
+            # Title separator
+            Write-Host $border.TLeft -NoNewline
+            for ($i = 0; $i -lt $Columns.Count; $i++) {
+                Write-Host ($border.Horizontal * $Columns[$i].Width) -NoNewline
+                if ($i -lt $Columns.Count - 1) {
+                    Write-Host $border.Cross -NoNewline
+                }
+            }
+            Write-Host $border.TRight
+        }
+        
+        # Draw header
+        if (-not $NoHeader) {
+            Write-Host $border.Vertical -NoNewline
+            foreach ($col in $Columns) {
+                $headerText = Format-TableCell -Text $col.Title -Width $col.Width -Align Center
+                Write-Host $headerText -NoNewline -ForegroundColor $(Get-ThemeProperty "DataTable.Header.FG")
+                Write-Host $border.Vertical -NoNewline
+            }
+            Write-Host
+            
+            # Header separator
+            Write-Host $border.TLeft -NoNewline
+            for ($i = 0; $i -lt $Columns.Count; $i++) {
+                Write-Host ($border.Horizontal * $Columns[$i].Width) -NoNewline
+                if ($i -lt $Columns.Count - 1) {
+                    Write-Host $border.Cross -NoNewline
+                }
+            }
+            Write-Host $border.TRight
+        }
+        
+        # Draw data rows
+        $rowIndex = 0
+        foreach ($item in $allData) {
+            Write-Host $border.Vertical -NoNewline
+            
+            # Determine row color
+            $rowColor = $null
+            if ($RowColorCondition) {
+                $result = & $RowColorCondition $item
+                if ($result) { $rowColor = $result }
+            } elseif ($rowIndex % 2 -eq 1) {
+                $rowColor = "DarkGray"
+            }
+            
+            foreach ($col in $Columns) {
+                $value = Get-PropertyValue $item $col.Name
+                $cellText = Format-TableCell -Text $value -Width $col.Width -Align $col.Align
+                
+                if ($rowColor) {
+                    Write-Host $cellText -NoNewline -ForegroundColor $rowColor
+                } else {
+                    Write-Host $cellText -NoNewline
+                }
+                Write-Host $border.Vertical -NoNewline
+            }
+            Write-Host
+            $rowIndex++
+        }
+        
+        # Draw bottom border
+        Write-Host $border.BottomLeft -NoNewline
+        for ($i = 0; $i -lt $Columns.Count; $i++) {
+            Write-Host ($border.Horizontal * $Columns[$i].Width) -NoNewline
+            if ($i -lt $Columns.Count - 1) {
+                Write-Host $border.TBottom -NoNewline
+            }
+        }
+        Write-Host $border.BottomRight
+    }
+}
+
+function Format-TableCell {
+    param(
+        [string]$Text,
+        [int]$Width,
+        [string]$Align = "Left"
+    )
+    
+    if ($Text.Length -gt $Width - 2) {
+        $Text = $Text.Substring(0, $Width - 3) + "…"
+    }
+    
+    $padded = switch ($Align) {
+        "Center" { $Text.PadLeft(($Width + $Text.Length) / 2).PadRight($Width) }
+        "Right" { $Text.PadLeft($Width - 1) + " " }
+        default { " " + $Text.PadRight($Width - 1) }
+    }
+    
+    return $padded
+}
+
+function Get-PropertyValue {
+    param($Object, $PropertyName)
+    
+    if ($PropertyName -contains ".") {
+        $parts = $PropertyName -split '\.'
+        $current = $Object
+        foreach ($part in $parts) {
+            $current = $current.$part
+            if ($null -eq $current) { return "" }
+        }
+        return $current
+    }
+    
+    $value = $Object.$PropertyName
+    if ($null -eq $value) { return "" }
+    return $value.ToString()
+}
+
+#endregion
+
+#region Dashboard Display
+
+function Show-Dashboard {
+    Clear-Host
+    
+    # Use Format-TableUnicode for the header
+    $headerData = @([PSCustomObject]@{
+        Title = "UNIFIED PRODUCTIVITY SUITE v5.0"
+        Subtitle = "All-in-One Command Center"
+    })
+    
+    Write-Host @"
+╔═══════════════════════════════════════════════════════════╗
+║          UNIFIED PRODUCTIVITY SUITE v5.0                  ║
+║               All-in-One Command Center                   ║
+╚═══════════════════════════════════════════════════════════╝
+"@ -ForegroundColor Cyan
+
+    # Quick stats
+    $activeTimers = $script:Data.ActiveTimers.Count
+    $activeTasks = ($script:Data.Tasks | Where-Object { -not $_.Completed }).Count
+    $todayHours = ($script:Data.TimeEntries | Where-Object { $_.Date -eq (Get-Date).ToString("yyyy-MM-dd") } | Measure-Object -Property Hours -Sum).Sum
+    $todayHours = if ($todayHours) { [Math]::Round($todayHours, 2) } else { 0 }
+    
+    Write-Host "`n📊 CURRENT STATUS" -ForegroundColor Yellow
+    Write-Host "═══════════════════════════════════════════" -ForegroundColor DarkGray
+    
+    Write-Host "  📅 Today: " -NoNewline
+    Write-Host (Get-Date).ToString("dddd, MMMM dd, yyyy") -ForegroundColor White
+    
+    Write-Host "  ⏱️  Today's Hours: " -NoNewline
+    if ($todayHours -gt 0) {
+        Write-Host "$todayHours" -ForegroundColor Green
+    } else {
+        Write-Host "None logged" -ForegroundColor Gray
+    }
+    
+    Write-Host "  ⏰ Active Timers: " -NoNewline
+    if ($activeTimers -gt 0) {
+        Write-Host "$activeTimers running" -ForegroundColor Red
+        
+        # Show active timer details
+        foreach ($timer in $script:Data.ActiveTimers.GetEnumerator() | Select-Object -First 2) {
+            $elapsed = (Get-Date) - [DateTime]$timer.Value.StartTime
+            $project = Get-ProjectOrTemplate $timer.Value.ProjectKey
+            Write-Host "     → $($project.Name): $([Math]::Floor($elapsed.TotalHours)):$($elapsed.ToString('mm\:ss'))" -ForegroundColor DarkCyan
+        }
+        if ($script:Data.ActiveTimers.Count -gt 2) {
+            Write-Host "     → ... and $($script:Data.ActiveTimers.Count - 2) more" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "None" -ForegroundColor Green
+    }
+    
+    Write-Host "  ✅ Active Tasks: " -NoNewline
+    if ($activeTasks -gt 0) {
+        Write-Host "$activeTasks" -ForegroundColor Yellow
+        
+        # Show urgent tasks
+        $overdue = $script:Data.Tasks | Where-Object {
+            $_.DueDate -and ([datetime]::Parse($_.DueDate) -lt [datetime]::Today) -and -not $_.Completed
+        }
+        $dueToday = $script:Data.Tasks | Where-Object {
+            $_.DueDate -and ([datetime]::Parse($_.DueDate).Date -eq [datetime]::Today) -and -not $_.Completed
+        }
+        
+        if ($overdue.Count -gt 0) {
+            Write-Host "     ⚠️  $($overdue.Count) overdue!" -ForegroundColor Red
+        }
+        if ($dueToday.Count -gt 0) {
+            Write-Host "     📅 $($dueToday.Count) due today" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "None - inbox zero! 🎉" -ForegroundColor Green
+    }
+    
+    Write-Host "  📁 Active Projects: " -NoNewline
+    $activeProjects = ($script:Data.Projects.Values | Where-Object { $_.Status -eq "Active" }).Count
+    Write-Host $activeProjects -ForegroundColor Cyan
+    
+    # Check for command snippets
+    $commandCount = ($script:Data.Tasks | Where-Object { $_.IsCommand -eq $true }).Count
+    if ($commandCount -gt 0) {
+        Write-Host "  💡 Command Snippets: " -NoNewline
+        Write-Host $commandCount -ForegroundColor Magenta
+    }
+    
+    # Week summary
+    Write-Host "`n📈 WEEK SUMMARY" -ForegroundColor Yellow
+    Write-Host "═══════════════════════════════════════════" -ForegroundColor DarkGray
+    
+    $weekStart = Get-WeekStart
+    $weekEntries = $script:Data.TimeEntries | Where-Object {
+        $entryDate = [DateTime]::Parse($_.Date)
+        $entryDate -ge $weekStart -and $entryDate -lt $weekStart.AddDays(7)
+    }
+    
+    $weekHours = ($weekEntries | Measure-Object -Property Hours -Sum).Sum
+    $weekHours = if ($weekHours) { [Math]::Round($weekHours, 2) } else { 0 }
+    
+    Write-Host "  Week of: $($weekStart.ToString('MMM dd, yyyy'))"
+    Write-Host "  Total Hours: $weekHours / $($script:Data.Settings.HoursPerDay * $script:Data.Settings.DaysPerWeek) target"
+    
+    # Progress bar for week
+    $targetHours = $script:Data.Settings.HoursPerDay * $script:Data.Settings.DaysPerWeek
+    $weekProgress = if ($targetHours -gt 0) { [Math]::Min(100, [Math]::Round(($weekHours / $targetHours) * 100, 0)) } else { 0 }
+    $progressBar = "[" + ("█" * [math]::Floor($weekProgress / 10)) + ("░" * (10 - [math]::Floor($weekProgress / 10))) + "]"
+    Write-Host "  Progress: $progressBar $weekProgress%" -ForegroundColor $(if ($weekProgress -ge 80) { "Green" } elseif ($weekProgress -ge 60) { "Yellow" } else { "Red" })
+    
+    # Quick actions
+    Write-Host "`n⚡ QUICK ACTIONS" -ForegroundColor Yellow
+    Write-Host "═══════════════════════════════════════════" -ForegroundColor DarkGray
+    Write-Host "  [M] Manual Time Entry    [S] Start Timer      [+key] Quick Actions"
+    Write-Host "  [A] Add Task            [V] View Active Timers"
+    Write-Host "  [T] Today's Tasks       [W] Week Report"
+    Write-Host "  [P] Projects            [H] Help"
+    
+    Write-Host "`n🔧 FULL MENU OPTIONS" -ForegroundColor Yellow
+    Write-Host "═══════════════════════════════════════════" -ForegroundColor DarkGray
+    Write-Host "  [1] Time Management     [4] Projects & Clients"
+    Write-Host "  [2] Task Management     [5] Tools & Utilities"
+    Write-Host "  [3] Reports & Analytics [6] Settings & Config"
+    Write-Host "`n  [Q] Quit"
+}
+
+#endregion
+
+#region Calendar Display
+
+function Show-Calendar {
+    param(
+        [DateTime]$Month = (Get-Date),
+        [DateTime[]]$HighlightDates = @()
+    )
+    
+    Write-Header "Calendar - $($Month.ToString('MMMM yyyy'))"
+    
+    $firstDay = Get-Date $Month -Day 1
+    $lastDay = $firstDay.AddMonths(1).AddDays(-1)
+    $startOffset = [int]$firstDay.DayOfWeek
+    
+    # Header
+    Write-Host "  Sun  Mon  Tue  Wed  Thu  Fri  Sat" -ForegroundColor Cyan
+    Write-Host "  " + ("─" * 35) -ForegroundColor DarkGray
+    
+    # Calculate task counts per day
+    $tasksByDate = @{}
+    $script:Data.Tasks | Where-Object { $_.DueDate } | ForEach-Object {
+        $date = [DateTime]::Parse($_.DueDate).Date
+        if ($date.Month -eq $Month.Month -and $date.Year -eq $Month.Year) {
+            if (-not $tasksByDate.ContainsKey($date)) {
+                $tasksByDate[$date] = 0
+            }
+            $tasksByDate[$date]++
+        }
+    }
+    
+    # Days
+    Write-Host -NoNewline "  "
+    
+    # Empty cells before first day
+    for ($i = 0; $i -lt $startOffset; $i++) {
+        Write-Host -NoNewline "     "
+    }
+    
+    # Days of month
+    for ($day = 1; $day -le $lastDay.Day; $day++) {
+        $currentDate = Get-Date -Year $Month.Year -Month $Month.Month -Day $day
+        $dayOfWeek = [int]$currentDate.DayOfWeek
+        
+        # Format day
+        $dayStr = $day.ToString().PadLeft(3)
+        
+        # Determine color
+        $color = "White"
+        if ($currentDate.Date -eq [DateTime]::Today) {
+            $color = "Green"
+        } elseif ($tasksByDate.ContainsKey($currentDate.Date)) {
+            $count = $tasksByDate[$currentDate.Date]
+            if ($count -ge 3) {
+                $color = "Red"
+            } elseif ($count -ge 1) {
+                $color = "Yellow"
+            }
+        } elseif ($dayOfWeek -eq 0 -or $dayOfWeek -eq 6) {
+            $color = "DarkGray"
+        }
+        
+        Write-Host -NoNewline $dayStr -ForegroundColor $color
+        
+        # Task indicator
+        if ($tasksByDate.ContainsKey($currentDate.Date)) {
+            Write-Host -NoNewline "*" -ForegroundColor Cyan
+        } else {
+            Write-Host -NoNewline " "
+        }
+        
+        # Space or newline
+        if ($dayOfWeek -eq 6) {
+            Write-Host
+            if ($day -lt $lastDay.Day) {
+                Write-Host -NoNewline "  "
+            }
+        } else {
+            Write-Host -NoNewline " "
+        }
+    }
+    
+    Write-Host "`n"
+    
+    # Legend
+    Write-Host "  Legend: " -NoNewline -ForegroundColor Gray
+    Write-Host "Today" -NoNewline -ForegroundColor Green
+    Write-Host " | " -NoNewline -ForegroundColor Gray
+    Write-Host "Tasks*" -NoNewline -ForegroundColor Cyan
+    Write-Host " | " -NoNewline -ForegroundColor Gray
+    Write-Host "Busy" -NoNewline -ForegroundColor Red
+    
+    # Navigation
+    Write-Host "`n  [P]revious | [N]ext | [T]oday | [Y]ear view"
+    $nav = Read-Host "  Navigation"
+    
+    switch ($nav.ToUpper()) {
+        "P" { Show-Calendar -Month $Month.AddMonths(-1) }
+        "N" { Show-Calendar -Month $Month.AddMonths(1) }
+        "T" { Show-Calendar -Month (Get-Date) }
+        "Y" { Show-YearCalendar -Year $Month.Year }
+    }
+}
+
+function Show-YearCalendar {
+    param([int]$Year = (Get-Date).Year)
+    
+    Write-Header "Calendar - $Year"
+    
+    # Display 3 months per row
+    for ($row = 0; $row -lt 4; $row++) {
+        $months = @()
+        for ($col = 0; $col -lt 3; $col++) {
+            $monthNum = $row * 3 + $col + 1
+            if ($monthNum -le 12) {
+                $months += Get-Date -Year $Year -Month $monthNum -Day 1
+            }
+        }
+        
+        # Month headers
+        Write-Host
+        foreach ($month in $months) {
+            Write-Host ("  " + $month.ToString("MMMM").PadRight(20)) -NoNewline -ForegroundColor Cyan
+            Write-Host "  " -NoNewline
+        }
+        Write-Host
+        
+        # Day headers
+        foreach ($month in $months) {
+            Write-Host "  Su Mo Tu We Th Fr Sa  " -NoNewline -ForegroundColor DarkCyan
+        }
+        Write-Host
+        
+        # Calculate max weeks needed
+        $maxWeeks = 6
+        
+        # Display days
+        for ($week = 0; $week -lt $maxWeeks; $week++) {
+            foreach ($month in $months) {
+                Write-Host "  " -NoNewline
+                
+                $firstDay = Get-Date $month -Day 1
+                $lastDay = $firstDay.AddMonths(1).AddDays(-1)
+                $startOffset = [int]$firstDay.DayOfWeek
+                
+                for ($dayOfWeek = 0; $dayOfWeek -lt 7; $dayOfWeek++) {
+                    $dayNum = $week * 7 + $dayOfWeek - $startOffset + 1
+                    
+                    if ($dayNum -ge 1 -and $dayNum -le $lastDay.Day) {
+                        $currentDate = Get-Date -Year $Year -Month $month.Month -Day $dayNum
+                        
+                        if ($currentDate.Date -eq [DateTime]::Today) {
+                            Write-Host $dayNum.ToString().PadLeft(2) -NoNewline -ForegroundColor Green
+                        } else {
+                            Write-Host $dayNum.ToString().PadLeft(2) -NoNewline
+                        }
+                    } else {
+                        Write-Host "  " -NoNewline
+                    }
+                    
+                    if ($dayOfWeek -lt 6) {
+                        Write-Host " " -NoNewline
+                    }
+                }
+                Write-Host "  " -NoNewline
+            }
+            Write-Host
+        }
+    }
+    
+    Write-Host "`nPress any key to continue..."
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+#endregion
+
+#region Progress Bar
+
+function Draw-ProgressBar {
+    param(
+        [int]$Percent,
+        [int]$Width = 20,
+        [string]$FillChar = "█",
+        [string]$EmptyChar = "░",
+        [string]$ForegroundColor = "Green",
+        [string]$BackgroundColor = "DarkGray"
+    )
+    
+    $filled = [Math]::Floor($Width * ($Percent / 100))
+    $empty = $Width - $filled
+    
+    Write-Host "[" -NoNewline
+    Write-Host ($FillChar * $filled) -NoNewline -ForegroundColor $ForegroundColor
+    Write-Host ($EmptyChar * $empty) -NoNewline -ForegroundColor $BackgroundColor
+    Write-Host "] $Percent%" -NoNewline
+}
+
+#endregion
+
+#region Menu Display
+
+function Show-MenuSelection {
+    param(
+        [string]$Title,
+        [string[]]$Options,
+        [string]$Prompt = "Select option",
+        [switch]$AllowMultiple,
+        [switch]$ReturnIndex
+    )
+    
+    Write-Header $Title
+    
+    for ($i = 0; $i -lt $Options.Count; $i++) {
+        Write-Host "[$($i + 1)] $($Options[$i])"
+    }
+    
+    if ($AllowMultiple) {
+        Write-Host "`nEnter numbers separated by commas (e.g., 1,3,5)"
+        Write-Host "Or enter 'all' to select all, 'none' to cancel"
+    } else {
+        Write-Host "`n[0] Cancel"
+    }
+    
+    $selection = Read-Host "`n$Prompt"
+    
+    if ($AllowMultiple) {
+        if ($selection -eq 'all') {
+            if ($ReturnIndex) {
+                return 0..($Options.Count - 1)
+            } else {
+                return $Options
+            }
+        } elseif ($selection -eq 'none' -or [string]::IsNullOrWhiteSpace($selection)) {
+            return @()
+        }
+        
+        $indices = $selection -split ',' | ForEach-Object {
+            $num = $_.Trim()
+            if ($num -match '^\d+$') {
+                $idx = [int]$num - 1
+                if ($idx -ge 0 -and $idx -lt $Options.Count) {
+                    if ($ReturnIndex) { $idx } else { $Options[$idx] }
+                }
+            }
+        }
+        return $indices
+    } else {
+        if ($selection -eq '0' -or [string]::IsNullOrWhiteSpace($selection)) {
+            return $null
+        }
+        
+        if ($selection -match '^\d+$') {
+            $idx = [int]$selection - 1
+            if ($idx -ge 0 -and $idx -lt $Options.Count) {
+                if ($ReturnIndex) { return $idx } else { return $Options[$idx] }
+            }
+        }
+        
+        return $null
+    }
+}
+
+#endregion
+
+#region Help Display
+
+function Show-Help {
+    Clear-Host
+    Write-Header "Help & Documentation"
+    
+    Write-Host @"
+UNIFIED PRODUCTIVITY SUITE v5.0
+===============================
+
+This integrated suite combines time tracking, task management, project
+management, Excel integration, and command snippets into a seamless 
+productivity system.
+
+QUICK ACTIONS (use +key from any prompt):
+----------------------------------------
++9, +m, +time     Manual time entry
++s, +timer        Start timer
++stop             Stop timer
++a, +task         Add task
++qa               Quick add task
++t                Today's tasks
++v                View active timers
++w, +week         Week report
++today            Today view
++timesheet        Export formatted timesheet
++p                Project details
++c, +cmd          Command snippets
++h, +help         Main help
++?                Quick action help
+
+TIME TRACKING:
+-------------
+- Manual entry is the preferred method for accurate time logging
+- Timers are available for real-time tracking
+- Link time entries to specific tasks for detailed tracking
+- Budget warnings alert you when projects approach limits
+- Quick entry format: PROJECT HOURS [DESCRIPTION]
+- Export formatted timesheets for external systems
+
+TASK MANAGEMENT:
+---------------
+- Smart sorting prioritizes urgent and overdue tasks
+- Multiple views: List, Kanban, Timeline, Project
+- Subtasks for breaking down complex work
+- Progress tracking with automatic calculation from subtasks
+- Quick add syntax: qa DESCRIPTION #category @tags !priority due:date
+
+PROJECT MANAGEMENT:
+------------------
+- Import projects from Excel forms with configurable mapping
+- Track budgets, billing rates, and project status
+- Automatic task and time statistics per project
+- Excel copy jobs for repetitive data transfers
+
+COMMAND SNIPPETS:
+----------------
+- Store frequently used commands and code snippets
+- Organize by category with tags for easy searching
+- Optional hotkeys for quick access
+- Auto-copy to clipboard feature
+- Search and filter capabilities
+
+EXCEL INTEGRATION:
+-----------------
+- Configure form mappings for consistent data import
+- Create reusable copy configurations
+- Batch import multiple projects
+- Export data in multiple formats
+
+FORMATTED TIMESHEET:
+-------------------
+The formatted timesheet export creates a CSV file with:
+- ID1 and formatted ID2 columns
+- Daily hours for the week (Mon-Fri)
+- Suitable for import into external time tracking systems
+
+KEYBOARD SHORTCUTS:
+------------------
+From task view:
+- qa <text>  : Quick add task
+- c <id>     : Complete task
+- e <id>     : Edit task
+- d <id>     : Delete task
+
+DATA STORAGE:
+------------
+All data is stored in: $script:DataPath
+Backups are automatic and kept for 30 days
+
+TIPS:
+----
+1. Use manual time entry for accurate logging after completing work
+2. Link tasks to projects for better organization
+3. Set up Excel copy jobs for repetitive data entry
+4. Use the dashboard for a quick overview of your day
+5. Archive completed tasks regularly to keep views clean
+6. Store common commands as snippets for quick access
+7. Use +key shortcuts to navigate quickly without menus
+
+"@ -ForegroundColor White
+    
+    Write-Host "`nPress any key to return..." -ForegroundColor Gray
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+#endregion

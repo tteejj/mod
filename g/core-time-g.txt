@@ -1,0 +1,429 @@
+# core-time.ps1
+# Core Time Tracking and Time-based Reporting Logic
+
+#region Formatted Timesheet Export (Requirement I)
+
+function Export-FormattedTimesheet {
+    param(
+        [DateTime]$WeekStartDate = (Get-WeekStart $script:Data.CurrentWeek) # Use current report week
+    )
+    Write-Header "Export Formatted Timesheet for week starting: $($WeekStartDate.ToString('yyyy-MM-dd'))"
+
+    $weekDates = @(0..4 | ForEach-Object { $WeekStartDate.AddDays($_) }) # Mon-Fri
+
+    $timeEntriesForWeek = $script:Data.TimeEntries | Where-Object {
+        $entryDate = [DateTime]::Parse($_.Date)
+        $entryDate -ge $weekDates[0] -and $entryDate -le $weekDates[4]
+    }
+
+    if ($timeEntriesForWeek.Count -eq 0) {
+        Write-Warning "No time entries found for the week of $($WeekStartDate.ToString('yyyy-MM-dd')). Nothing to export."
+        return
+    }
+
+    # Group entries by ProjectKey, then by day
+    $reportData = @{} # Hashtable: Key = ProjectKey, Value = Hashtable (DayOfWeek -> Hours)
+    foreach ($entry in $timeEntriesForWeek) {
+        if (-not $reportData.ContainsKey($entry.ProjectKey)) {
+            $reportData[$entry.ProjectKey] = @{ Mon = 0.0; Tue = 0.0; Wed = 0.0; Thu = 0.0; Fri = 0.0 }
+        }
+        $dayIndex = ([datetime]::Parse($entry.Date).DayOfWeek - [DayOfWeek]::Monday + 7) % 7 # Mon=0, Tue=1..
+        if ($dayIndex -ge 0 -and $dayIndex -le 4) { # Only Mon-Fri
+            $dayKey = @("Mon", "Tue", "Wed", "Thu", "Fri")[$dayIndex]
+            $reportData[$entry.ProjectKey][$dayKey] += [double]$entry.Hours
+        }
+    }
+
+    $csvOutput = @()
+    # Header row as specified: ID1,ID2,,,,Mon,Tue,Wed,Thu,Fri
+    $csvOutput += "ID1,ID2,,,,Mon,Tue,Wed,Thu,Fri" 
+
+    foreach ($projKey in $reportData.Keys | Sort-Object) {
+        $project = Get-ProjectOrTemplate $projKey # Assumes Get-ProjectOrTemplate from core-data.ps1
+        if (-not $project) { Write-Warning "Project data for key '$projKey' not found. Skipping."; continue }
+        
+        $id1 = if ($project.Id1) { $project.Id1 } else { "" }
+        $id2 = if ($project.Id2) { $project.Id2 } else { $projKey } # Fallback to project key if Id2 is missing
+
+        $line = """$id1"",""$id2"",,,," # Using quotes for safety if IDs contain commas
+        $line += "$($reportData[$projKey].Mon.ToString('F2')),"
+        $line += "$($reportData[$projKey].Tue.ToString('F2')),"
+        $line += "$($reportData[$projKey].Wed.ToString('F2')),"
+        $line += "$($reportData[$projKey].Thu.ToString('F2')),"
+        $line += "$($reportData[$projKey].Fri.ToString('F2'))"
+        $csvOutput += $line
+    }
+    
+    if ($csvOutput.Count -le 1) { # Only header means no actual data
+        Write-Warning "No processable project time entries found for the timesheet."
+        return
+    }
+
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $fileName = "FormattedTimesheet_Week-$($WeekStartDate.ToString('yyyyMMdd'))_$timestamp.csv"
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    $filePath = Join-Path $desktopPath $fileName
+
+    try {
+        $csvOutput | Set-Content -Path $filePath -Encoding UTF8
+        Write-Success "Formatted timesheet exported to: $filePath"
+        if (Test-Path $filePath) {
+            # Ask to open
+            Write-Host "Open the exported file? (Y/N)" -NoNewline
+            if ((Read-Host).ToUpper() -eq 'Y') {
+                Start-Process $filePath
+            }
+        }
+    } catch {
+        Write-Error "Failed to export timesheet: $_"
+    }
+}
+
+#endregion
+
+#region Core Time Tracking Logic (Migrated from Pmc Mod Base.txt)
+
+function Add-ManualTimeEntry {
+    Write-Header "Manual Time Entry"
+    Show-ProjectsAndTemplates -Simple # UI function
+   
+    $projectKey = Read-Host "`nProject/Template Key"
+    $project = Get-ProjectOrTemplate $projectKey # core-data.ps1
+    if (-not $project) { Write-Error "Project '$projectKey' not found."; return }
+   
+    $dateStr = Read-Host "Date (YYYY-MM-DD, 'today', 'yesterday', or Enter for today)"
+    $date = if ([string]::IsNullOrWhiteSpace($dateStr)) { [DateTime]::Today.Date } 
+            else { try { Parse-SmartDate $dateStr } catch { Write-Error "Invalid date: $_"; return }} # core-data.ps1
+    if (-not $date) {Write-Error "Date could not be parsed."; return }
+
+    Write-Host "Enter time as hours (e.g., 2.5) or range (e.g., 09:00-11:30)"
+    $timeInput = Read-Host "Time"
+    $hours = 0.0; $startTime = ""; $endTime = ""
+   
+    if ($timeInput -match '(\d{1,2}:\d{2})-(\d{1,2}:\d{2})') {
+        try {
+            $start = [DateTime]::Parse("$($date.ToString('yyyy-MM-dd')) $($Matches[1])")
+            $end = [DateTime]::Parse("$($date.ToString('yyyy-MM-dd')) $($Matches[2])")
+            if ($end -lt $start) { $end = $end.AddDays(1) } # Handle overnight
+            $hours = ($end - $start).TotalHours; $startTime = $Matches[1]; $endTime = $Matches[2]
+            Write-Info "Calculated hours: $([Math]::Round($hours, 2))"
+        } catch { Write-Error "Invalid time range format: $_"; return }
+    } elseif ($timeInput -match '^\d+(\.\d+)?$') {
+        $hours = [double]$timeInput
+    } else { Write-Error "Invalid time input format."; return }
+   
+    $description = Read-Host "Description (optional)"
+    $taskId = $null
+    Write-Host "`nLink to a task for project '$($project.Name)'? (Y/N)"
+    if ((Read-Host).ToUpper() -eq 'Y') {
+        $projectTasks = $script:Data.Tasks | Where-Object { $_.ProjectKey -eq $projectKey -and (-not $_.Completed) -and ($_.IsCommand -ne $true) }
+        if ($projectTasks.Count -gt 0) {
+            Write-Host "`nActive tasks for '$($project.Name)':"
+            $projectTasks | ForEach-Object {$idx=0} { Write-Host "  [$($idx++)] ($($_.Id.Substring(0,6))) $($_.Description)" } # Show temp index for easy selection
+            $taskSelection = Read-Host "`nTask ID (partial ID or #)"
+            $matchedTask = $null
+            if ($taskSelection -match '^\d+$' -and [int]$taskSelection -lt $projectTasks.Count) {
+                $matchedTask = $projectTasks[[int]$taskSelection]
+            } else {
+                $matchedTask = $projectTasks | Where-Object { $_.Id.StartsWith($taskSelection) } | Select-Object -First 1
+            }
+
+            if ($matchedTask) { $taskId = $matchedTask.Id; $matchedTask.TimeSpent = [Math]::Round($matchedTask.TimeSpent + $hours, 2) }
+            else { Write-Warning "Task not found. No task link." }
+        } else { Write-Info "No active, non-command tasks for this project to link."}
+    }
+   
+    $entry = @{
+        Id = New-TodoId; ProjectKey = $projectKey; TaskId = $taskId # New-TodoId from helper.ps1
+        Date = $date.ToString("yyyy-MM-dd"); Hours = [Math]::Round($hours, 2)
+        Description = $description; StartTime = $startTime; EndTime = $endTime
+        EnteredAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    }
+    $script:Data.TimeEntries += $entry
+    Update-ProjectStatistics -ProjectKey $projectKey # core-data.ps1
+    Save-UnifiedData # helper.ps1
+    Write-Success "Time entry added: $($entry.Hours) hours for $($project.Name) on $($date.ToString('yyyy-MM-dd'))"
+    Show-BudgetWarning -ProjectKey $projectKey
+}
+
+function Start-Timer {
+    param([string]$ProjectKey, [string]$TaskId, [string]$Description)
+    if (-not $ProjectKey -and -not $TaskId) {
+        Write-Header "Start Timer"
+        # UI Logic to select project/task would be here or in ui.ps1, then call this with params
+        # For now, keeping it simple as per Pmc Mod Base structure
+        Show-ProjectsAndTemplates -Simple
+        $ProjectKey = Read-Host "`nProject/Template Key"
+        if (-not (Get-ProjectOrTemplate $ProjectKey)) { Write-Error "Project not found."; return }
+        # Could add task selection here too.
+    }
+    if (-not $Description) { $Description = Read-Host "Description for timer (optional)" }
+
+    $timerKey = if ($TaskId) { $TaskId } else { $ProjectKey } # Timer identified by Task ID if present, else Project Key
+    if ($script:Data.ActiveTimers.ContainsKey($timerKey)) { Write-Warning "Timer already running for '$timerKey'!"; return }
+
+    $timer = @{ StartTime = Get-Date; ProjectKey = $ProjectKey; TaskId = $TaskId; Description = $Description }
+    $script:Data.ActiveTimers[$timerKey] = $timer
+    Save-UnifiedData
+    $projName = (Get-ProjectOrTemplate $ProjectKey).Name
+    Write-Success "Timer started for '$projName' ($timerKey) at $(Get-Date -Format 'HH:mm:ss')."
+}
+
+function Stop-Timer {
+    param([string]$TimerKeyToStop) # Can be project key or task ID
+    if ($script:Data.ActiveTimers.Count -eq 0) { Write-Warning "No active timers."; return }
+
+    if (-not $TimerKeyToStop) {
+        Show-ActiveTimers # UI function
+        $TimerKeyToStop = Read-Host "`nEnter Timer Key (Project Key or Task ID) to stop, or 'all'"
+    }
+    if ([string]::IsNullOrWhiteSpace($TimerKeyToStop)) { return }
+
+    if ($TimerKeyToStop.ToLower() -eq 'all') {
+        $keysToStop = @($script:Data.ActiveTimers.Keys) # Copy keys as collection changes
+        foreach ($key in $keysToStop) { Stop-SingleTimer -Key $key -Silent }
+        Write-Success "Stopped all ($($keysToStop.Count)) active timers."
+    } else {
+        if ($script:Data.ActiveTimers.ContainsKey($TimerKeyToStop)) {
+            Stop-SingleTimer -Key $TimerKeyToStop
+        } else { Write-Error "Timer with key '$TimerKeyToStop' not found." }
+    }
+    Save-UnifiedData
+}
+
+function Stop-SingleTimer {
+    param([string]$Key, [switch]$Silent)
+    if (-not $script:Data.ActiveTimers.ContainsKey($Key)) {
+        if (-not $Silent) { Write-Error "Timer key '$Key' not found in active timers." }
+        return
+    }
+    $timer = $script:Data.ActiveTimers[$Key]
+    $endTime = Get-Date
+    $duration = ($endTime - [DateTime]$timer.StartTime).TotalHours
+
+    $entry = @{
+        Id = New-TodoId; ProjectKey = $timer.ProjectKey; TaskId = $timer.TaskId
+        Date = $endTime.Date.ToString("yyyy-MM-dd"); Hours = [Math]::Round($duration, 2)
+        StartTime = ([DateTime]$timer.StartTime).ToString("HH:mm"); EndTime = $endTime.ToString("HH:mm")
+        Description = $timer.Description; EnteredAt = (Get-Date -F s)
+    }
+    $script:Data.TimeEntries += $entry
+    if ($timer.TaskId) {
+        $task = $script:Data.Tasks | Where-Object { $_.Id -eq $timer.TaskId } | Select-Object -First 1
+        if ($task) { $task.TimeSpent = [Math]::Round($task.TimeSpent + $duration, 2) }
+    }
+    Update-ProjectStatistics -ProjectKey $timer.ProjectKey # core-data.ps1
+    $script:Data.ActiveTimers.Remove($Key)
+    
+    if (-not $Silent) {
+        $projName = (Get-ProjectOrTemplate $timer.ProjectKey).Name
+        Write-Success "Timer for '$projName' ($Key) stopped. Duration: $($entry.Hours) hours."
+        Show-BudgetWarning -ProjectKey $timer.ProjectKey
+    }
+}
+
+function Quick-TimeEntry {
+    param([string]$Input) # Format: PROJECT_KEY HOURS [DESCRIPTION]
+    $parts = $Input -split ' ', 3
+    if ($parts.Count -lt 2) { Write-Error "Format: PROJECT_KEY HOURS [DESCRIPTION]"; return }
+    $projectKey = $parts[0]
+    try { $hours = [double]$parts[1] } catch { Write-Error "Invalid hours format."; return }
+    $description = if ($parts.Count -eq 3) { $parts[2] } else { "" }
+
+    $project = Get-ProjectOrTemplate $projectKey # core-data.ps1
+    if (-not $project) { Write-Error "Project '$projectKey' not found."; return }
+
+    $entry = @{
+        Id = New-TodoId; ProjectKey = $projectKey; TaskId = $null
+        Date = (Get-Date).Date.ToString("yyyy-MM-dd"); Hours = [Math]::Round($hours, 2)
+        Description = $description; StartTime = ""; EndTime = ""
+        EnteredAt = (Get-Date -F s)
+    }
+    $script:Data.TimeEntries += $entry
+    Update-ProjectStatistics -ProjectKey $projectKey # core-data.ps1
+    Save-UnifiedData # helper.ps1
+    Write-Success "Quick entry: $hours hours for $($project.Name)"
+}
+
+function Show-BudgetWarning { # Helper function, typically called after adding time
+    param([string]$ProjectKey)
+    $project = $script:Data.Projects[$ProjectKey] # Assumes it's a project, not template
+    if (-not $project -or $project.BillingType -eq "Non-Billable" -or -not $project.Budget -or $project.Budget -eq 0) { return }
+    
+    Update-ProjectStatistics -ProjectKey $ProjectKey # Ensure stats are fresh
+    $percentUsed = ($project.TotalHours / $project.Budget) * 100
+   
+    if ($percentUsed -ge 100) {
+        Write-Error "BUDGET EXCEEDED for $($project.Name): $([Math]::Round($percentUsed,1))% used. Budget: $($project.Budget)h, Spent: $($project.TotalHours)h."
+    } elseif ($percentUsed -ge 90) {
+        Write-Warning "Budget alert for $($project.Name): $([Math]::Round($percentUsed,1))% used. Remaining: $([Math]::Round($project.Budget - $project.TotalHours, 2))h."
+    } elseif ($percentUsed -ge 75) {
+        Write-Warning "Budget notice for $($project.Name): $([Math]::Round($percentUsed,1))% used."
+    }
+}
+
+function Edit-TimeEntry {
+    Write-Header "Edit Time Entry"
+    # UI for selecting an entry should precede this call.
+    # This function would take an $EntryId or $EntryObject parameter.
+    # For brevity, showing conceptual logic for an identified entry.
+    Write-Warning "Edit Time Entry: Select entry via 'Today's Log' or Reports, then use context menu (not fully implemented here)."
+    # Example:
+    # param($EntryIdToEdit)
+    # $entry = $script:Data.TimeEntries | Where-Object {$_.Id -eq $EntryIdToEdit} | Select-Object -First 1
+    # if (-not $entry) { Write-Error "Entry not found."; return }
+    # ... (logic like in Pmc Mod Base) ...
+}
+
+function Delete-TimeEntry {
+    Write-Header "Delete Time Entry"
+    Write-Warning "Delete Time Entry: Select entry via 'Today's Log' or Reports, then use context menu (not fully implemented here)."
+    # ... (similar to Edit-TimeEntry, requires UI selection first) ...
+}
+
+#endregion
+
+#region Time-based Reporting Data Functions (Migrated from Pmc Mod Base.txt)
+# These functions prepare data or perform calculations for reports.
+# The actual display (Write-Host, Format-TableUnicode) will be in ui.ps1 or main.ps1 orchestrating UI.
+
+function Get-WeekReportData { # Data gathering for Show-WeekReport
+    param([DateTime]$WeekStartDate = $script:Data.CurrentWeek)
+    $weekDates = Get-WeekDates $WeekStartDate # helper.ps1
+    $weekEntries = $script:Data.TimeEntries | Where-Object {
+        $entryDate = [DateTime]::Parse($_.Date)
+        $entryDate -ge $weekDates[0] -and $entryDate -le $weekDates[4] # Mon-Fri
+    }
+    if ($weekEntries.Count -eq 0) { return $null }
+
+    $projectHours = @{} # Key: ProjectKey, Value: @{Mon=h, Tue=h ... Total=h, Billable=b, Value=v}
+    foreach ($entry in $weekEntries) {
+        if (-not $projectHours.ContainsKey($entry.ProjectKey)) {
+            $projectInfo = Get-ProjectOrTemplate $entry.ProjectKey
+            $projectHours[$entry.ProjectKey] = @{
+                Name = $projectInfo.Name; Id1 = $projectInfo.Id1; Id2 = $projectInfo.Id2
+                Client = $projectInfo.Client; Department = $projectInfo.Department
+                IsBillable = ($projectInfo.BillingType -eq "Billable"); Rate = $projectInfo.Rate
+                Mon = 0.0; Tue = 0.0; Wed = 0.0; Thu = 0.0; Fri = 0.0; Total = 0.0; Value = 0.0
+            }
+        }
+        $dayIndex = ([datetime]::Parse($entry.Date).DayOfWeek - [DayOfWeek]::Monday + 7) % 7
+        if ($dayIndex -ge 0 -and $dayIndex -le 4) {
+            $dayKey = @("Mon", "Tue", "Wed", "Thu", "Fri")[$dayIndex]
+            $projectHours[$entry.ProjectKey][$dayKey] +=
+
+
+
+```powershell
+# core-time.ps1 (Continued)
+            $projectHours[$entry.ProjectKey][$dayKey] = [Math]::Round($projectHours[$entry.ProjectKey][$dayKey], 2)
+        }
+    }
+    # Calculate totals and value
+    foreach ($key in $projectHours.Keys) {
+        $projData = $projectHours[$key]
+        $projData.Total = $projData.Mon + $projData.Tue + $projData.Wed + $projData.Thu + $projData.Fri
+        if ($projData.IsBillable) {
+            $projData.Value = $projData.Total * $projData.Rate
+        }
+    }
+    return $projectHours.Values | Sort-Object Name
+}
+
+function Get-ExtendedReportData { # Data gathering for Show-ExtendedReport
+    param([DateTime]$WeekStartDate = $script:Data.CurrentWeek)
+    $weekDates = Get-WeekDates $WeekStartDate # Mon-Fri
+    $allEntries = $script:Data.TimeEntries | Where-Object {
+        $entryDate = [DateTime]::Parse($_.Date)
+        $entryDate -ge $weekDates[0] -and $entryDate -le $weekDates[4]
+    } | Sort-Object Date, StartTime
+    
+    return $allEntries # UI module will group and display
+}
+
+function Get-TodayTimeLogData { # Data for Show-TodayTimeLog
+    $today = (Get-Date).ToString("yyyy-MM-dd")
+    return $script:Data.TimeEntries | Where-Object { $_.Date -eq $today } | Sort-Object StartTime, EnteredAt
+}
+
+function Get-MonthSummaryData { # Data for Show-MonthSummary
+    param([DateTime]$MonthDate = (Get-Date)) # Any date within the target month
+    $monthStart = Get-Date $MonthDate -Day 1 -Hour 0 -Minute 0 -Second 0
+    $monthEnd = $monthStart.AddMonths(1).AddDays(-1).AddHours(23).AddMinutes(59).AddSeconds(59) # End of last day of month
+
+    $monthEntries = $script:Data.TimeEntries | Where-Object {
+        $date = [DateTime]::Parse($_.Date)
+        $date -ge $monthStart -and $date -le $monthEnd
+    }
+    return $monthEntries # UI module will group by project and display
+}
+
+function Get-ProjectSummaryData { # Data for Show-ProjectSummary
+    # This function would iterate through $script:Data.Projects
+    # and for each, gather related time entries to sum up hours.
+    # Update-ProjectStatistics in core-data.ps1 already does this and stores on project object.
+    # So, this function might just return $script:Data.Projects.Values
+    # after ensuring all stats are updated.
+    $script:Data.Projects.Values | ForEach-Object { Update-ProjectStatistics -ProjectKey $_.PSObject.Properties["Key"].Value } # Assuming Key is present if it's from a hashtable enumerator
+    return $script:Data.Projects.Values | Sort-Object Status, Name
+}
+
+function Get-TimeAnalyticsData { # Data for Show-TimeAnalytics
+    # Gathers various time stats for the UI to display
+    $last30DaysEntries = $script:Data.TimeEntries | Where-Object {
+        [DateTime]::Parse($_.Date) -ge (Get-Date).AddDays(-30).Date
+    }
+    # Further processing (by day of week, top projects) can be done here or in UI based on this raw data.
+    return @{
+        Last30DaysEntries = $last30DaysEntries
+        # Could add more aggregated data here if useful for UI
+    }
+}
+
+#endregion
+
+#region Settings Functions (Time Tracking Settings, from Pmc Mod Base.txt)
+
+function Edit-TimeTrackingSettings {
+    Write-Header "Time Tracking Settings"
+    $settings = $script:Data.Settings # Shortcut
+    
+    Write-Host "Leave empty to keep current value." -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+   
+    $newRate = Read-Host "`nDefault hourly rate ($($settings.DefaultRate))"
+    if ($newRate -match '^\d+(\.\d+)?$') { $settings.DefaultRate = [double]$newRate } 
+    elseif ($newRate) { Write-Warning "Invalid rate. Kept current."}
+
+    $newHoursDay = Read-Host "`nHours per day (target for reports) ($($settings.HoursPerDay))"
+    if ($newHoursDay -match '^\d+(\.\d+)?$') { $settings.HoursPerDay = [double]$newHoursDay }
+    elseif ($newHoursDay) { Write-Warning "Invalid hours. Kept current."}
+    
+    $newDaysWeek = Read-Host "`nDays per week (target for reports) ($($settings.DaysPerWeek))"
+    if ($newDaysWeek -match '^\d$') { $settings.DaysPerWeek = [int]$newDaysWeek }
+    elseif ($newDaysWeek) { Write-Warning "Invalid days. Kept current."}
+
+    $settings.Currency = Read-Host "`nCurrency symbol ($($settings.Currency))" | ForEach-Object { if ($_) { $_ } else { $settings.Currency } }
+
+    Write-Host "`nEdit Project Templates? (Y/N)"
+    if((Read-Host).ToUpper() -eq 'Y') {
+        Manage-ProjectTemplates
+    }
+
+    Save-UnifiedData
+    Write-Success "Time tracking settings updated!"
+}
+
+function Manage-ProjectTemplates {
+    Write-Header "Manage Project Templates"
+    # List current templates
+    # Options: Add, Edit, Delete template
+    # Similar CRUD operations as for regular projects but on $script:Data.Settings.TimeTrackerTemplates
+    Write-Warning "Template management not fully implemented in this stub."
+    # Example list:
+    # foreach($key in $script:Data.Settings.TimeTrackerTemplates.Keys | Sort-Object) {
+    #    $template = $script:Data.Settings.TimeTrackerTemplates[$key]
+    #    Write-Host "[$key] $($template.Name) - $($template.BillingType)"
+    # }
+}
+
+#endregion

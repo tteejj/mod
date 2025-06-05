@@ -1,0 +1,1312 @@
+# ui.ps1
+# (Content from ui-ps1 (4).txt, with migrations from Pmc Mod Base.txt)
+
+# UI Components Module
+# Tables, menus, borders, and display functions
+
+#region Table Formatting
+
+function Format-TableUnicode {
+    param(
+        [Parameter(ValueFromPipeline)]
+        [object[]]$Data,
+        
+        [hashtable[]]$Columns,
+        
+        [string]$BorderStyle = "Single", # Default can be set from theme $script:CurrentTheme.DataTable.BorderStyle
+        [string]$Title = "",
+        [switch]$NoHeader,
+        [switch]$Wrap,
+        [int]$MaxWidth = 0, # 0 means console width or auto
+        [hashtable]$RowColors = @{}, # e.g. @{ Property = "Status"; Value = "Overdue"; Color = "Red" }
+        [scriptblock]$RowColorCondition # e.g. { param($row) if ($row.Status -eq 'Overdue') { "Red" } }
+    )
+    
+    begin {
+        $allData = @()
+        $effectiveBorderStyle = if ($script:CurrentTheme -and $script:CurrentTheme.DataTable) { $script:CurrentTheme.DataTable.BorderStyle } else { $BorderStyle }
+        $border = Get-BorderStyleChars -Style $effectiveBorderStyle
+        $dataTableHeaderFg = Get-ThemeProperty "DataTable.Header.FG"
+        $dataTableRowFg = Get-ThemeProperty "DataTable.DataRow.FG"
+        $dataTableRowAltFg = Get-ThemeProperty "DataTable.AltRow.FG"
+        if (-not $dataTableHeaderFg) { $dataTableHeaderFg = Get-ThemeProperty "Palette.AccentFG" } # Fallback
+        if (-not $dataTableRowFg) { $dataTableRowFg = Get-ThemeProperty "Palette.PrimaryFG" } # Fallback
+        if (-not $dataTableRowAltFg) { $dataTableRowAltFg = Get-ThemeProperty "Palette.SecondaryFG" } # Fallback
+
+
+        if ($MaxWidth -eq 0) {
+            try {
+                $MaxWidth = $Host.UI.RawUI.WindowSize.Width - 2 # Adjust for potential scrollbars/margins
+            } catch {
+                $MaxWidth = 80 # Fallback if console width cannot be determined
+            }
+        }
+    }
+    
+    process {
+        if ($Data) {
+            $allData += $Data
+        }
+    }
+    
+    end {
+        if ($allData.Count -eq 0) {
+            Write-Host "No data to display" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG" )
+            return
+        }
+        
+        # Auto-generate columns if not provided
+        if (-not $Columns) {
+            $props = $allData[0].PSObject.Properties | Where-Object { $_.MemberType -eq 'NoteProperty' }
+            $Columns = $props | ForEach-Object {
+                @{
+                    Name = $_.Name
+                    Title = $_.Name # Capitalize first letter for default title
+                    Width = 0      # Auto-size
+                    Align = "Left" # Default alignment
+                }
+            }
+        }
+        
+        # Calculate column widths
+        foreach ($col in $Columns) {
+            if ($col.Width -eq 0 -or -not $col.ContainsKey("Width")) {
+                # Auto-size column
+                $maxLen = $col.Title.ToString().Length
+                foreach ($item in $allData) {
+                    $value = Get-PropertyValue $item $col.Name
+                    $len = if ($value) { $value.ToString().Length } else { 0 }
+                    if ($len -gt $maxLen) { $maxLen = $len }
+                }
+                # Add padding, default to 2 if not specified by theme
+                $colPad = if ($script:CurrentTheme -and $script:CurrentTheme.DataTable) { $script:CurrentTheme.DataTable.Pad * 2 } else { 2 } 
+                $col.Width = [Math]::Min($maxLen + $colPad, 50)  # Cap at 50 chars default
+            }
+            if (-not $col.ContainsKey("Align")) {
+                $col.Align = "Left" # Default alignment
+            }
+        }
+        
+        # Calculate total width required by columns
+        $contentTotalWidth = ($Columns | Measure-Object -Property Width -Sum).Sum
+        $totalTableWidth = $contentTotalWidth + ($Columns.Count + 1) # borders
+
+        if ($MaxWidth -gt 0 -and $totalTableWidth -gt $MaxWidth) {
+            # Proportional adjustment logic:
+            # Calculate overflow and distribute reduction proportionally, ensuring min width (e.g., 5).
+            $overflow = $totalTableWidth - $MaxWidth
+            $adjustableWidth = $contentTotalWidth # Sum of all column widths we can adjust
+            
+            foreach ($col in $Columns) {
+                if ($adjustableWidth -le 0) { break } # Avoid division by zero
+                $proportionalReduction = [int](($col.Width / $adjustableWidth) * $overflow)
+                $newWidth = $col.Width - $proportionalReduction
+                $col.Width = [Math]::Max(5, $newWidth) # Ensure minimum width
+            }
+            # Recalculate total width after adjustments
+            $contentTotalWidth = ($Columns | Measure-Object -Property Width -Sum).Sum
+            $totalTableWidth = $contentTotalWidth + ($Columns.Count + 1)
+        }
+        
+        # Draw top border
+        Write-Host $border.TopLeft -NoNewline
+        for ($i = 0; $i -lt $Columns.Count; $i++) {
+            Write-Host ($border.Horizontal * $Columns[$i].Width) -NoNewline
+            if ($i -lt $Columns.Count - 1) {
+                Write-Host $border.TTop -NoNewline
+            }
+        }
+        Write-Host $border.TopRight
+        
+        # Draw title if provided
+        if ($Title) {
+            Write-Host $border.Vertical -NoNewline
+            $titleContentWidth = $totalTableWidth - 2
+            $titlePadded = " $Title ".PadRight($titleContentWidth).Substring(0, $titleContentWidth)
+            Write-Host (Apply-PSStyle -Text $titlePadded -FG (Get-ThemeProperty "Palette.HeaderFG") -Bold) -NoNewline
+            Write-Host $border.Vertical
+            
+            # Title separator
+            Write-Host $border.TLeft -NoNewline
+            for ($i = 0; $i -lt $Columns.Count; $i++) {
+                Write-Host ($border.Horizontal * $Columns[$i].Width) -NoNewline
+                if ($i -lt $Columns.Count - 1) {
+                    Write-Host $border.Cross -NoNewline
+                }
+            }
+            Write-Host $border.TRight
+        }
+        
+        # Draw header
+        if (-not $NoHeader) {
+            Write-Host $border.Vertical -NoNewline
+            foreach ($col in $Columns) {
+                $headerText = Format-TableCell -Text $col.Title -Width $col.Width -Align "Center" # Headers often centered
+                Write-Host (Apply-PSStyle -Text $headerText -FG $dataTableHeaderFg -Bold) -NoNewline
+                Write-Host $border.Vertical -NoNewline
+            }
+            Write-Host
+            
+            # Header separator (use Cross if title was present, otherwise TLeft/TRight)
+            $headerSepLeft = if ($Title) { $border.TLeft } else { $border.TLeft }
+            $headerSepRight = if ($Title) { $border.TRight } else { $border.TRight }
+            $headerSepCross = $border.Cross
+            
+            Write-Host $headerSepLeft -NoNewline
+            for ($i = 0; $i -lt $Columns.Count; $i++) {
+                Write-Host ($border.Horizontal * $Columns[$i].Width) -NoNewline
+                if ($i -lt $Columns.Count - 1) {
+                    Write-Host $headerSepCross -NoNewline
+                }
+            }
+            Write-Host $headerSepRight
+        }
+        
+        # Draw data rows
+        $rowIndex = 0
+        foreach ($item in $allData) {
+            Write-Host $border.Vertical -NoNewline
+            
+            # Determine row color
+            $effectiveRowColor = if ($rowIndex % 2 -eq 1 -and $dataTableRowAltFg) { $dataTableRowAltFg } else { $dataTableRowFg }
+            $customColor = $null
+            if ($RowColorCondition) {
+                $customColor = & $RowColorCondition $item # Scriptblock should return a color string or $null
+            } elseif ($RowColors.Count -gt 0) {
+                foreach($rcKey in $RowColors.Keys) {
+                    if ($item.$($RowColors[$rcKey].Property) -eq $RowColors[$rcKey].Value) {
+                        $customColor = $RowColors[$rcKey].Color
+                        break
+                    }
+                }
+            }
+            if ($customColor) { $effectiveRowColor = $customColor }
+
+
+            foreach ($col in $Columns) {
+                $value = Get-PropertyValue $item $col.Name
+                $cellText = Format-TableCell -Text $value -Width $col.Width -Align $col.Align -Wrap:$Wrap
+                
+                Write-Host (Apply-PSStyle -Text $cellText -FG $effectiveRowColor) -NoNewline
+                Write-Host $border.Vertical -NoNewline
+            }
+            Write-Host
+            $rowIndex++
+        }
+        
+        # Draw bottom border
+        Write-Host $border.BottomLeft -NoNewline
+        for ($i = 0; $i -lt $Columns.Count; $i++) {
+            Write-Host ($border.Horizontal * $Columns[$i].Width) -NoNewline
+            if ($i -lt $Columns.Count - 1) {
+                Write-Host $border.TBottom -NoNewline
+            }
+        }
+        Write-Host $border.BottomRight
+    }
+}
+
+function Format-TableCell {
+    param(
+        [string]$Text,
+        [int]$Width,
+        [string]$Align = "Left",
+        [switch]$Wrap # Placeholder for future wrap implementation
+    )
+    
+    $actualText = if ($null -eq $Text) { "" } else { $Text.ToString() }
+    $pad = if ($script:CurrentTheme -and $script:CurrentTheme.DataTable) { $script:CurrentTheme.DataTable.Pad } else { 1 } 
+    $contentWidth = $Width - ($pad * 2)
+
+    if ($contentWidth -lt 1) { # Not enough space for content and padding
+        return " " * $Width # Return empty cell of correct width
+    }
+
+    if ($actualText.Length -gt $contentWidth) {
+        if ($Wrap) {
+            # Basic wrapping (more advanced wrapping would be complex here)
+            # This is a simplified version, real wrapping needs multi-line support in the table
+            $actualText = $actualText.Substring(0, $contentWidth - 1) + "…" # Indicate truncation for now
+        } else {
+            $actualText = $actualText.Substring(0, $contentWidth - 1) + "…"
+        }
+    }
+    
+    $paddingLeft = " " * $pad
+    $paddingRight = " " * $pad
+    
+    $paddedText = switch ($Align.ToLower()) {
+        "center" { 
+            $totalPadding = $contentWidth - $actualText.Length
+            $leftPadCount = [Math]::Floor($totalPadding / 2)
+            $rightPadCount = $totalPadding - $leftPadCount
+            "$($paddingLeft)$(' ' * $leftPadCount)$actualText$(' ' * $rightPadCount)$($paddingRight)"
+        }
+        "right"  { "$($paddingLeft)$(' ' * ($contentWidth - $actualText.Length))$actualText$($paddingRight)" }
+        default  { "$($paddingLeft)$actualText$(' ' * ($contentWidth - $actualText.Length))$($paddingRight)" } # Left
+    }
+    
+    # Ensure the final string is exactly $Width characters long
+    if ($paddedText.Length -gt $Width) {
+        return $paddedText.Substring(0, $Width)
+    } elseif ($paddedText.Length -lt $Width) {
+        return $paddedText.PadRight($Width)
+    }
+    return $paddedText
+}
+
+function Get-PropertyValue {
+    param($Object, $PropertyName)
+    
+    if ($null -eq $Object) { return "" }
+
+    if ($PropertyName -contains ".") {
+        $parts = $PropertyName -split '\.'
+        $current = $Object
+        foreach ($part in $parts) {
+            if ($null -eq $current) { return "" }
+            # Check if $current is a PSCustomObject or Hashtable and has the property/key
+            if (($current -is [System.Management.Automation.PSCustomObject] -and $null -ne $current.PSObject.Properties[$part]) -or
+                ($current -is [hashtable] -and $current.ContainsKey($part))) {
+                $current = $current.$part
+            } else {
+                return "" # Property/key not found
+            }
+        }
+        return if ($null -eq $current) { "" } else { $current.ToString() }
+    }
+    
+    # Handle direct property access
+    if (($Object -is [System.Management.Automation.PSCustomObject] -and $null -ne $Object.PSObject.Properties[$PropertyName]) -or
+        ($Object -is [hashtable] -and $Object.ContainsKey($PropertyName))) {
+        $value = $Object.$PropertyName
+        return if ($null -eq $value) { "" } else { $value.ToString() }
+    }
+    
+    return "" # PropertyName not found
+}
+
+#endregion
+
+#region Dashboard Display (from ui-ps1 (4).txt)
+
+function Show-Dashboard {
+    Clear-Host
+    
+    # Header Section (Uses direct Write-Host with fixed characters as per original)
+    Write-Host @"
+╔═══════════════════════════════════════════════════════════╗
+║          UNIFIED PRODUCTIVITY SUITE v5.0                  ║
+║               All-in-One Command Center                   ║
+╚═══════════════════════════════════════════════════════════╝
+"@ -ForegroundColor (Get-ThemeProperty "Palette.AccentFG")
+
+    # Quick stats
+    $activeTimers = if ($script:Data -and $script:Data.ActiveTimers) { $script:Data.ActiveTimers.Count } else { 0 }
+    $activeTasks = if ($script:Data -and $script:Data.Tasks) { ($script:Data.Tasks | Where-Object { -not $_.Completed -and ($_.IsCommand -ne $true -or ($_.IsCommand -eq $true -and $script:Data.Settings.CommandSnippets.ShowInTaskList -eq $true) ) }).Count } else { 0 }
+    $todayHours = 0
+    if ($script:Data -and $script:Data.TimeEntries) {
+        $todayHours = ($script:Data.TimeEntries | Where-Object { $_.Date -eq (Get-Date).ToString("yyyy-MM-dd") } | Measure-Object -Property Hours -Sum).Sum
+        $todayHours = if ($todayHours) { [Math]::Round($todayHours, 2) } else { 0 }
+    }
+    
+    Write-Host "`n📊 CURRENT STATUS" -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+    Write-Host "═══════════════════════════════════════════" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    
+    Write-Host "  📅 Today: " -NoNewline
+    Write-Host (Get-Date).ToString("dddd, MMMM dd, yyyy") -ForegroundColor (Get-ThemeProperty "Palette.PrimaryFG")
+    
+    Write-Host "  ⏱️  Today's Hours: " -NoNewline
+    if ($todayHours -gt 0) {
+        Write-Host "$todayHours" -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG")
+    } else {
+        Write-Host "None logged" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    }
+    
+    Write-Host "  ⏰ Active Timers: " -NoNewline
+    if ($activeTimers -gt 0) {
+        Write-Host "$activeTimers running" -ForegroundColor (Get-ThemeProperty "Palette.ErrorFG")
+        
+        if ($script:Data.ActiveTimers) {
+            foreach ($timer in $script:Data.ActiveTimers.GetEnumerator() | Select-Object -First 2) {
+                $elapsed = (Get-Date) - [DateTime]$timer.Value.StartTime
+                $project = if (Get-Command Get-ProjectOrTemplate -ErrorAction SilentlyContinue) { Get-ProjectOrTemplate $timer.Value.ProjectKey } else { @{Name="Project?"} }
+                Write-Host "     → $($project.Name): $([Math]::Floor($elapsed.TotalHours)):$($elapsed.ToString('mm\:ss'))" -ForegroundColor (Get-ThemeProperty "Palette.InfoFG")
+            }
+            if ($script:Data.ActiveTimers.Count -gt 2) {
+                Write-Host "     → ... and $($script:Data.ActiveTimers.Count - 2) more" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+            }
+        }
+    } else {
+        Write-Host "None" -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG")
+    }
+    
+    Write-Host "  ✅ Active Tasks: " -NoNewline # Excluding commands from this count
+    $actualActiveTasks = if ($script:Data -and $script:Data.Tasks) { ($script:Data.Tasks | Where-Object { -not $_.Completed -and $_.IsCommand -ne $true }).Count } else { 0 }
+    if ($actualActiveTasks -gt 0) {
+        Write-Host "$actualActiveTasks" -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+        
+        if ($script:Data.Tasks) {
+            $overdue = $script:Data.Tasks | Where-Object {
+                $_.IsCommand -ne $true -and $_.DueDate -and ([datetime]::Parse($_.DueDate) -lt [datetime]::Today) -and -not $_.Completed
+            }
+            $dueToday = $script:Data.Tasks | Where-Object {
+                $_.IsCommand -ne $true -and $_.DueDate -and ([datetime]::Parse($_.DueDate).Date -eq [datetime]::Today.Date) -and -not $_.Completed
+            }
+            
+            if ($overdue.Count -gt 0) {
+                Write-Host "     ⚠️  $($overdue.Count) overdue!" -ForegroundColor (Get-ThemeProperty "Palette.ErrorFG")
+            }
+            if ($dueToday.Count -gt 0) {
+                Write-Host "     📅 $($dueToday.Count) due today" -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+            }
+        }
+    } else {
+        Write-Host "None - inbox zero! 🎉" -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG")
+    }
+    
+    Write-Host "  📁 Active Projects: " -NoNewline
+    $activeProjectsCount = if ($script:Data -and $script:Data.Projects) { ($script:Data.Projects.Values | Where-Object { $_.Status -eq "Active" }).Count } else { 0 }
+    Write-Host $activeProjectsCount -ForegroundColor (Get-ThemeProperty "Palette.AccentFG")
+    
+    # Check for command snippets
+    $commandCount = if ($script:Data -and $script:Data.Tasks) { ($script:Data.Tasks | Where-Object { $_.IsCommand -eq $true }).Count } else { 0 }
+    if ($commandCount -gt 0) {
+        Write-Host "  💡 Command Snippets: " -NoNewline
+        Write-Host $commandCount -ForegroundColor (Get-ThemeProperty "Palette.InfoFG") # Or a distinct color for snippets
+    }
+    
+    # Week summary
+    Write-Host "`n📈 WEEK SUMMARY" -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+    Write-Host "═══════════════════════════════════════════" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    
+    $weekStart = if (Get-Command Get-WeekStart -ErrorAction SilentlyContinue) { Get-WeekStart } else { (Get-Date).Date }
+    $weekHours = 0
+    $targetHours = 0
+    if ($script:Data -and $script:Data.TimeEntries -and $script:Data.Settings) {
+        $weekEntries = $script:Data.TimeEntries | Where-Object {
+            $entryDate = [DateTime]::Parse($_.Date)
+            $entryDate -ge $weekStart -and $entryDate -lt $weekStart.AddDays(7)
+        }
+        $weekHours = ($weekEntries | Measure-Object -Property Hours -Sum).Sum
+        $weekHours = if ($weekHours) { [Math]::Round($weekHours, 2) } else { 0 }
+        $targetHours = $script:Data.Settings.HoursPerDay * $script:Data.Settings.DaysPerWeek
+    }
+    
+    Write-Host "  Week of: $($weekStart.ToString('MMM dd, yyyy'))"
+    Write-Host "  Total Hours: $weekHours / $targetHours target"
+    
+    # Progress bar for week
+    $weekProgress = if ($targetHours -gt 0) { [Math]::Min(100, [Math]::Round(($weekHours / $targetHours) * 100, 0)) } else { 0 }
+    
+    $progressColor = Get-ThemeProperty "Palette.ErrorFG" # Default to Red
+    if ($weekProgress -ge 80) { $progressColor = Get-ThemeProperty "Palette.SuccessFG" }
+    elseif ($weekProgress -ge 50) { $progressColor = Get-ThemeProperty "Palette.WarningFG" }
+    
+    $barWidth = 20 # Width of the progress bar in characters
+    $filledCount = [Math]::Floor($barWidth * ($weekProgress / 100))
+    $emptyCount = $barWidth - $filledCount
+    $progressBar = "[" + ("█" * $filledCount) + ("░" * $emptyCount) + "]"
+    
+    Write-Host "  Progress: $(Apply-PSStyle -Text "$progressBar $weekProgress%" -FG $progressColor)"
+    
+    # Quick actions (as defined in main.ps1's help, slightly adapted)
+    Write-Host "`n⚡ QUICK ACTIONS" -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+    Write-Host "═══════════════════════════════════════════" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    Write-Host "  [M] Manual Time (+m)   [S] Start Timer (+s)   [A] Add Task (+a)"
+    Write-Host "  [V] View Timers (+v)   [T] Today's Tasks (+t) [W] Week Report (+w)"
+    Write-Host "  [P] Projects (+p)      [C] Cmd Snippets (+c)  [H] Help (+h)"
+    
+    Write-Host "`n🔧 FULL MENU OPTIONS" -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+    Write-Host "═══════════════════════════════════════════" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    Write-Host "  [1] Time Management     [4] Projects & Clients"
+    Write-Host "  [2] Task Management     [5] Tools & Utilities"
+    Write-Host "  [3] Reports & Analytics [6] Settings & Config"
+    Write-Host "`n  [Q] Quit"
+}
+
+#endregion
+
+#region Calendar Display (from ui-ps1 (4).txt)
+
+function Show-Calendar {
+    param(
+        [DateTime]$Month = (Get-Date),
+        [DateTime[]]$HighlightDates = @() # Not used in current impl but good param
+    )
+    
+    Write-Header "Calendar - $($Month.ToString('MMMM yyyy'))"
+    
+    $firstDayOfMonth = Get-Date $Month -Day 1
+    $lastDayOfMonth = $firstDayOfMonth.AddMonths(1).AddDays(-1)
+    # PowerShell DayOfWeek: Sunday = 0, Monday = 1, ..., Saturday = 6
+    $startOffset = [int]$firstDayOfMonth.DayOfWeek 
+    
+    # Header
+    Write-Host "  Sun  Mon  Tue  Wed  Thu  Fri  Sat" -ForegroundColor (Get-ThemeProperty "Palette.AccentFG")
+    Write-Host "  " + ("─" * 35) -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    
+    # Calculate task counts per day for the current month
+    $tasksByDate = @{}
+    if ($script:Data -and $script:Data.Tasks) {
+        $script:Data.Tasks | Where-Object { $_.DueDate -and $_.IsCommand -ne $true } | ForEach-Object {
+            try {
+                $date = [DateTime]::Parse($_.DueDate).Date
+                if ($date.Month -eq $Month.Month -and $date.Year -eq $Month.Year) {
+                    if (-not $tasksByDate.ContainsKey($date)) {
+                        $tasksByDate[$date] = 0
+                    }
+                    $tasksByDate[$date]++
+                }
+            } catch {
+                # Ignore tasks with unparseable due dates for calendar view
+            }
+        }
+    }
+    
+    # Days
+    Write-Host -NoNewline "  " # Initial indent for the first row
+    
+    # Empty cells before the first day of the month
+    for ($i = 0; $i -lt $startOffset; $i++) {
+        Write-Host -NoNewline "     " # 5 spaces for " DD* "
+    }
+    
+    # Days of the month
+    for ($day = 1; $day -le $lastDayOfMonth.Day; $day++) {
+        $currentDate = Get-Date -Year $Month.Year -Month $Month.Month -Day $day
+        $dayOfWeek = [int]$currentDate.DayOfWeek
+        
+        $dayStr = $day.ToString().PadLeft(2) # Format day as "DD"
+        
+        # Determine color
+        $dayDisplayColor = Get-ThemeProperty "Palette.PrimaryFG" # Default
+        if ($currentDate.Date -eq [DateTime]::Today.Date) {
+            $dayDisplayColor = Get-ThemeProperty "Palette.SuccessFG" # Today
+        } elseif ($tasksByDate.ContainsKey($currentDate.Date)) {
+            $count = $tasksByDate[$currentDate.Date]
+            if ($count -ge 3) {
+                $dayDisplayColor = Get-ThemeProperty "Palette.ErrorFG" # Busy (many tasks)
+            } elseif ($count -ge 1) {
+                $dayDisplayColor = Get-ThemeProperty "Palette.WarningFG" # Has tasks
+            }
+        } elseif ($dayOfWeek -eq 0 -or $dayOfWeek -eq 6) { # Sunday or Saturday
+            $dayDisplayColor = Get-ThemeProperty "Palette.SubtleFG" # Weekend
+        }
+        
+        Write-Host -NoNewline " " # Space before day
+        Write-Host -NoNewline $dayStr -ForegroundColor $dayDisplayColor
+        
+        # Task indicator
+        if ($tasksByDate.ContainsKey($currentDate.Date)) {
+            Write-Host -NoNewline "*" -ForegroundColor (Get-ThemeProperty "Palette.AccentFG")
+        } else {
+            Write-Host -NoNewline " " # Placeholder for task indicator
+        }
+        Write-Host -NoNewline " " # Space after day/indicator
+        
+        # Newline after Saturday or if it's the last day and not Saturday
+        if ($dayOfWeek -eq 6) {
+            Write-Host
+            if ($day -lt $lastDayOfMonth.Day) {
+                Write-Host -NoNewline "  " # Indent for next row
+            }
+        }
+    }
+    Write-Host # Ensure a final newline if the month doesn't end on Saturday
+    Write-Host "`n"
+    
+    # Legend
+    Write-Host "  Legend: " -NoNewline -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    Write-Host "Today" -NoNewline -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG")
+    Write-Host " | Tasks*" -NoNewline -ForegroundColor (Get-ThemeProperty "Palette.AccentFG")
+    Write-Host " | Has Tasks" -NoNewline -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+    Write-Host " | Busy" -NoNewline -ForegroundColor (Get-ThemeProperty "Palette.ErrorFG")
+    Write-Host "`n"
+    
+    # Navigation
+    Write-Host "  [P]revious Month | [N]ext Month | [T]oday's Month | [Y]ear View | [B]ack"
+    $nav = Read-Host "  Calendar Navigation"
+    
+    switch ($nav.ToUpper()) {
+        "P" { Show-Calendar -Month $Month.AddMonths(-1) }
+        "N" { Show-Calendar -Month $Month.AddMonths(1) }
+        "T" { Show-Calendar -Month (Get-Date) }
+        "Y" { Show-YearCalendar -Year $Month.Year }
+        "B" { return } # Back to previous menu
+        default { Show-Calendar -Month $Month } # Redisplay current on invalid input
+    }
+}
+
+function Show-YearCalendar {
+    param([int]$Year = (Get-Date).Year)
+    
+    Write-Header "Calendar - $Year"
+    
+    # Display 3 months per row
+    for ($row = 0; $row -lt 4; $row++) { # 4 rows of 3 months
+        $monthsInRow = @()
+        for ($col = 0; $col -lt 3; $col++) {
+            $monthNum = $row * 3 + $col + 1
+            if ($monthNum -le 12) {
+                $monthsInRow += Get-Date -Year $Year -Month $monthNum -Day 1
+            }
+        }
+        
+        if ($monthsInRow.Count -eq 0) { break }
+
+        # Month headers
+        Write-Host # Blank line before month names
+        foreach ($monthDate in $monthsInRow) {
+            # Each month display area is roughly 22 chars: "  MonthName (padded to 20)  "
+            Write-Host ("  " + $monthDate.ToString("MMMM").PadRight(20)) -NoNewline -ForegroundColor (Get-ThemeProperty "Palette.AccentFG")
+            Write-Host "  " -NoNewline # Spacer between month blocks
+        }
+        Write-Host # Newline after month names
+        
+        # Day headers (Su Mo Tu We Th Fr Sa)
+        foreach ($monthDate in $monthsInRow) {
+            Write-Host "  Su Mo Tu We Th Fr Sa  " -NoNewline -ForegroundColor (Get-ThemeProperty "Palette.InfoFG") # DarkCyan in original
+        }
+        Write-Host # Newline after day headers
+        
+        # Calculate max weeks needed for any month (usually 6)
+        $maxWeeksInThisRow = 0
+        foreach($monthDate in $monthsInRow) {
+            $firstDay = Get-Date $monthDate -Day 1
+            $startOffset = [int]$firstDay.DayOfWeek
+            $daysInMonth = [DateTime]::DaysInMonth($Year, $monthDate.Month)
+            $weeksNeeded = [Math]::Ceiling(($daysInMonth + $startOffset) / 7)
+            if ($weeksNeeded -gt $maxWeeksInThisRow) { $maxWeeksInThisRow = $weeksNeeded }
+        }
+        
+        # Display days for each month in the row, week by week
+        for ($weekIndex = 0; $weekIndex -lt $maxWeeksInThisRow; $weekIndex++) {
+            foreach ($monthDate in $monthsInRow) {
+                Write-Host "  " -NoNewline # Indent for this month's week line
+                
+                $firstDayOfMonth = Get-Date $monthDate -Day 1
+                $lastDayOfMonth = $firstDayOfMonth.AddMonths(1).AddDays(-1)
+                $startOffsetInMonth = [int]$firstDayOfMonth.DayOfWeek
+                
+                for ($dayOfWeekIndex = 0; $dayOfWeekIndex -lt 7; $dayOfWeekIndex++) { # Sun to Sat
+                    # Calculate actual day number for current cell
+                    $dayNumber = ($weekIndex * 7) + $dayOfWeekIndex - $startOffsetInMonth + 1
+                    
+                    if ($dayNumber -ge 1 -and $dayNumber -le $lastDayOfMonth.Day) {
+                        $currentCellDate = Get-Date -Year $Year -Month $monthDate.Month -Day $dayNumber
+                        
+                        $dayDisplay = $dayNumber.ToString().PadLeft(2)
+                        $dayColor = Get-ThemeProperty "Palette.PrimaryFG" # Default
+                        if ($currentCellDate.Date -eq [DateTime]::Today.Date) {
+                            $dayColor = Get-ThemeProperty "Palette.SuccessFG" # Today
+                        } elseif ($dayOfWeekIndex -eq 0 -or $dayOfWeekIndex -eq 6) { # Weekend
+                            $dayColor = Get-ThemeProperty "Palette.SubtleFG"
+                        }
+                        Write-Host $dayDisplay -NoNewline -ForegroundColor $dayColor
+                    } else {
+                        Write-Host "  " -NoNewline # Empty cell (outside month days)
+                    }
+                    
+                    if ($dayOfWeekIndex -lt 6) { # If not Saturday
+                        Write-Host " " -NoNewline # Space between days
+                    }
+                }
+                Write-Host "  " -NoNewline # Spacer after this month's week line, before next month's
+            }
+            Write-Host # Newline after processing all months for this week
+        }
+         Write-Host # Extra blank line between rows of months for readability
+    }
+    
+    Write-Host "`n  [P]revious Year | [N]ext Year | [T]oday's Year | [B]ack to Month View"
+    $nav = Read-Host "  Year Calendar Navigation"
+    
+    switch ($nav.ToUpper()) {
+        "P" { Show-YearCalendar -Year ($Year - 1) }
+        "N" { Show-YearCalendar -Year ($Year + 1) }
+        "T" { Show-YearCalendar -Year (Get-Date).Year }
+        "B" { Show-Calendar -Month (Get-Date -Year $Year -Month (Get-Date).Month -Day 1); return } # Back to current month of displayed year
+        default { Show-YearCalendar -Year $Year } # Redisplay current on invalid input
+    }
+}
+
+#endregion
+
+#region Progress Bar (from ui-ps1 (4).txt)
+
+function Draw-ProgressBar {
+    param(
+        [int]$Percent,
+        [int]$Width = 20,
+        [string]$FillChar = "█",
+        [string]$EmptyChar = "░",
+        [string]$ForegroundColor = "Green", # ConsoleColor name or Hex
+        [string]$BackgroundColor = "DarkGray" # ConsoleColor name or Hex
+    )
+    
+    $clampedPercent = [Math]::Max(0, [Math]::Min(100, $Percent))
+    $filled = [Math]::Floor($Width * ($clampedPercent / 100))
+    $empty = $Width - $filled
+    
+    Write-Host "[" -NoNewline
+    Write-Host (Apply-PSStyle -Text ($FillChar * $filled) -FG $ForegroundColor) -NoNewline
+    Write-Host (Apply-PSStyle -Text ($EmptyChar * $empty) -FG $BackgroundColor) -NoNewline
+    Write-Host "] $($clampedPercent)%" -NoNewline
+}
+
+#endregion
+
+#region Menu Display (from ui-ps1 (4).txt, serves as Show-Menu from report)
+
+function Show-MenuSelection {
+    param(
+        [string]$Title,
+        [object[]]$Options, # Can be string array or array of hashtables @{Label=".."; Value=".."} or @{Name=".."; Action={...}}
+        [string]$Prompt = "Select option",
+        [switch]$AllowMultiple,
+        [switch]$ReturnIndex, # If $true, returns index, else returns selected option object/string
+        [string]$CancelOptionLabel = "Cancel", # Label for cancel option
+        [string]$CancelOptionKey = "0" # Key for cancel option
+    )
+    
+    Write-Header $Title
+    
+    $optionObjects = @() # To store the actual objects if $Options contains complex items
+
+    for ($i = 0; $i -lt $Options.Count; $i++) {
+        $option = $Options[$i]
+        $label = ""
+        if ($option -is [hashtable]) {
+            if ($option.ContainsKey("Label")) { $label = $option.Label }
+            elseif ($option.ContainsKey("Name")) { $label = $option.Name }
+            else { $label = $option.ToString() } # Fallback
+            $optionObjects += $option
+        } elseif ($option -is [string]) {
+            $label = $option
+            $optionObjects += $option
+        } else { # PSCustomObject or other
+            $label = $option.ToString() # Basic fallback
+            if ($option.PSObject.Properties["Label"]) { $label = $option.Label }
+            elseif ($option.PSObject.Properties["Name"]) { $label = $option.Name }
+            $optionObjects += $option
+        }
+        Write-Host "[$($i + 1)] $label"
+    }
+    
+    if ($AllowMultiple) {
+        Write-Host "`nEnter numbers separated by commas (e.g., 1,3,5)"
+        Write-Host "Or enter 'all' to select all, 'none' to cancel"
+    } else {
+        Write-Host "`n[$CancelOptionKey] $CancelOptionLabel"
+    }
+    
+    $selectionInput = Read-Host "`n$Prompt"
+    
+    if ($AllowMultiple) {
+        if ($selectionInput -eq 'all') {
+            if ($ReturnIndex) {
+                return 0..($optionObjects.Count - 1)
+            } else {
+                return $optionObjects
+            }
+        } elseif ($selectionInput -eq 'none' -or [string]::IsNullOrWhiteSpace($selectionInput)) {
+            return @() # Empty array for no selection
+        }
+        
+        $selectedItems = @()
+        $indices = $selectionInput -split ',' | ForEach-Object { $_.Trim() }
+        foreach ($numStr in $indices) {
+            if ($numStr -match '^\d+$') {
+                $idx = [int]$numStr - 1
+                if ($idx -ge 0 -and $idx -lt $optionObjects.Count) {
+                    if ($ReturnIndex) { $selectedItems += $idx } else { $selectedItems += $optionObjects[$idx] }
+                } else { Write-Warning "Invalid option number: $numStr" }
+            } else { Write-Warning "Invalid input: $numStr" }
+        }
+        return $selectedItems | Select-Object -Unique # Ensure unique if numbers repeated
+    } else { # Single selection
+        if ($selectionInput -eq $CancelOptionKey -or [string]::IsNullOrWhiteSpace($selectionInput)) {
+            return $null # Standard cancellation return
+        }
+        
+        if ($selectionInput -match '^\d+$') {
+            $idx = [int]$selectionInput - 1
+            if ($idx -ge 0 -and $idx -lt $optionObjects.Count) {
+                if ($ReturnIndex) { return $idx } else { return $optionObjects[$idx] }
+            }
+        }
+        
+        Write-Error "Invalid selection."
+        return $null # Invalid selection
+    }
+}
+
+#endregion
+
+#region Help Display (from ui-ps1 (4).txt)
+
+function Show-Help {
+    Clear-Host
+    Write-Header "Help & Documentation - Unified Productivity Suite v5.0"
+    
+    # The help text from ui-ps1 (4).txt is quite comprehensive and includes quick actions
+    Write-Host @"
+UNIFIED PRODUCTIVITY SUITE v5.0
+===============================
+
+This integrated suite combines time tracking, task management, project
+management, Excel integration, and command snippets into a seamless 
+productivity system.
+
+QUICK ACTIONS (use +key from any prompt):
+----------------------------------------
++9, +m, +time     Manual time entry
++s, +timer        Start timer
++stop             Stop timer
++a, +task         Add task
++qa               Quick add task (e.g., +qa My new task #category !high due:tomorrow)
++t                Today's tasks / Today View
++v                View active timers
++w, +week         Week report
++p                Project details / Project Menu
++c, +cmd          Command snippets
++h, +help         This main help screen
++?                Quick action help (list of +key commands)
++cal              Show Calendar
++export           Export formatted timesheet
+
+TIME TRACKING:
+-------------
+- Manual entry (+m) is flexible for logging time after work is done.
+- Live timers (+s) for real-time tracking.
+- Link time entries to tasks for granular reporting.
+- Budget warnings for projects.
+- Quick time entry format from main menu: PROJECT_KEY HOURS [DESCRIPTION]
+
+TASK MANAGEMENT:
+---------------
+- Smart sorting in task views prioritizes by urgency and importance.
+- Multiple views available via Task Management menu.
+- Subtasks support for complex work.
+- Progress tracking, can be auto-calculated from subtasks.
+- Quick add task syntax (+qa): DESCRIPTION #category @tags !priority due:date project:KEY est:HOURS
+
+PROJECT MANAGEMENT:
+------------------
+- Add projects manually or import from Excel (configurable mapping).
+- Track budgets, billing rates, status.
+- View project statistics (time, tasks).
+
+COMMAND SNIPPETS (+c):
+--------------------
+- Store and retrieve frequently used commands or code.
+- Organize by category and tags.
+- Optional hotkeys (requires external setup if OS-wide).
+- Auto-copy to clipboard option.
+
+EXCEL INTEGRATION:
+-----------------
+- Configure mappings for importing project data from Excel forms.
+- Reusable Excel copy configurations for transferring data between sheets/workbooks.
+
+FORMATTED TIMESHEET (+export):
+---------------------------
+- Creates a CSV file suitable for import into external systems.
+- Columns: ID1, ID2, (empty), (empty), (empty), (empty), Mon_Hours, Tue_Hours, ...
+
+KEYBOARD SHORTCUTS (within specific views, e.g., Task List):
+------------------
+- Contextual shortcuts are often listed at the bottom of the view.
+  Examples: 'c <id>' (complete), 'e <id>' (edit), 'd <id>' (delete)
+
+DATA STORAGE:
+------------
+All data is stored in JSON format in: $script:DataPath (typically ~/.ProductivitySuite)
+Automatic backups are created in the 'backups' subfolder.
+
+TIPS:
+----
+1. Explore +key quick actions for fast navigation and operations.
+2. Customize project templates and Excel form mappings in Settings.
+3. Regularly archive completed tasks to keep views clean.
+4. Use the Dashboard for a daily overview and quick access.
+5. Leverage command snippets for repetitive shell commands or code blocks.
+"@ -ForegroundColor (Get-ThemeProperty "Palette.PrimaryFG")
+    
+    Write-Host "`nPress any key to return..." -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+#endregion
+
+#region Migrated Task UI functions from Pmc Mod Base.txt
+
+function Show-TasksView {
+    param(
+        [string]$Filter = "",
+        [string]$SortBy = "Smart", # Default sort
+        [switch]$ShowCompleted,
+        [string]$View = "Default" # Default view type
+    )
+   
+    # Get tasks, excluding command snippets unless settings allow
+    $tasksToDisplay = $script:Data.Tasks | Where-Object { 
+        $_.IsCommand -ne $true -or ($_.IsCommand -eq $true -and $script:Data.Settings.CommandSnippets.ShowInTaskList -eq $true)
+    }
+
+    # Apply text filter
+    if ($Filter) {
+        $tasksToDisplay = $tasksToDisplay | Where-Object {
+            $_.Description -like "*$Filter*" -or
+            $_.Category -like "*$Filter*" -or
+            ($_.Tags -join " ") -like "*$Filter*" -or # Search within joined tags
+            $_.ProjectKey -like "*$Filter*" -or
+            $_.Id -like "*$Filter*" # Allow filtering by ID
+        }
+    }
+   
+    # Filter completed based on ShowCompleted and settings
+    if (-not $ShowCompleted) {
+        $cutoffDate = [datetime]::Today.AddDays(-$script:Data.Settings.ShowCompletedDays)
+        $tasksToDisplay = $tasksToDisplay | Where-Object {
+            -not $_.Completed -or ($_.CompletedDate -and [datetime]::Parse($_.CompletedDate) -ge $cutoffDate)
+        }
+    }
+   
+    # Sorting logic
+    $sortedTasks = switch ($SortBy.ToLower()) {
+        "smart" {
+            $tasksToDisplay | Sort-Object @{Expression={
+                $statusValue = 8 # Default for unknown or general
+                if ($_.Completed) { $statusValue = 10 } # Completed last in smart sort
+                else {
+                    switch(Get-TaskStatus $_) { # Assumes Get-TaskStatus is in core-data.ps1
+                        "Overdue"     { $statusValue = 1 }
+                        "Due Today"   { $statusValue = 2 }
+                        "Critical"    { $statusValue = 3 } # If priority is main factor
+                        "High"        { $statusValue = 4 }
+                        "Due Soon"    { $statusValue = 5 }
+                        "In Progress" { $statusValue = 6 }
+                        "Medium"      { $statusValue = 7 }
+                        "Scheduled"   { $statusValue = 8 }
+                        "Low"         { $statusValue = 9 }
+                        "Pending"     { $statusValue = 9 } # Pending/Low together
+                    }
+                }
+                $statusValue
+            }}, @{Expression={ # Secondary sort by priority numerical value
+                switch($_.Priority.ToLower()) {
+                    "critical" { 1 }
+                    "high"     { 2 }
+                    "medium"   { 3 }
+                    "low"      { 4 }
+                    default    { 5 }
+                }
+            }}, DueDate, CreatedDate
+        }
+        "priority" {
+            $tasksToDisplay | Sort-Object @{Expression={
+                switch($_.Priority.ToLower()) {
+                    "critical" { 1 } "high" { 2 } "medium" { 3 } "low" { 4 } default { 5 }
+                }
+            }}, DueDate, CreatedDate
+        }
+        "duedate"  { $tasksToDisplay | Sort-Object @{Expression={if ($_.DueDate) {[datetime]$_.DueDate} else {[datetime]::MaxValue}}}, Priority }
+        "created"  { $tasksToDisplay | Sort-Object CreatedDate -Descending } # Most recent first
+        "category" { $tasksToDisplay | Sort-Object Category, Priority }
+        "project"  { $tasksToDisplay | Sort-Object ProjectKey, Priority }
+        default    { $tasksToDisplay } # No sort or fallback
+    }
+   
+    if ($sortedTasks.Count -eq 0) {
+        Write-Host "`n  📭 No tasks match your criteria." -ForegroundColor (Get-ThemeProperty "Palette.WarningFG")
+        Show-TaskStatistics $sortedTasks # Show stats even for empty set (will show 0s)
+        return
+    }
+   
+    # Display using the chosen view mode
+    switch ($View.ToLower()) {
+        "kanban"   { Show-KanbanView $sortedTasks }
+        "timeline" { Show-TimelineView $sortedTasks }
+        "project"  { Show-ProjectTaskView $sortedTasks }
+        default    { Show-TaskListView $sortedTasks } # "List" or "Default" view
+    }
+   
+    Show-TaskStatistics $sortedTasks # Display statistics at the bottom
+}
+
+function Show-TaskListView {
+    param($Tasks)
+   
+    # Define columns for Format-TableUnicode
+    $columns = @(
+        @{Name="Icon"; Title="S"; Width=3} # Status/Priority Icon
+        @{Name="Id"; Title="ID"; Width=7}
+        @{Name="Description"; Title="Description"; Width=40; Wrap=$true} # Allow wrapping for long descriptions
+        @{Name="DueDate"; Title="Due"; Width=12}
+        @{Name="Priority"; Title="Pri"; Width=6}
+        @{Name="Progress"; Title="Prog"; Width=5; Align="Right"}
+        @{Name="Project"; Title="Project"; Width=15}
+        @{Name="Tags"; Title="Tags"; Width=20}
+    )
+
+    $tableData = $Tasks | ForEach-Object {
+        $priorityInfo = Get-PriorityInfo $_.Priority # Assumes Get-PriorityInfo is in core-data.ps1
+        $project = if ($_.ProjectKey) { (Get-ProjectOrTemplate $_.ProjectKey).Name } else { "-" } # Assumes Get-ProjectOrTemplate
+        $progressDisplay = if ($_.Completed) { "Done" } elseif ($_.Progress -gt 0) { "$($_.Progress)%" } else { "-" }
+        
+        $statusIcon = if ($_.Completed) { Apply-PSStyle -Text "✅" -FG (Get-ThemeProperty "DataTable.Highlight.Completed.FG") } 
+                      else { $priorityInfo.Icon }
+        
+        [PSCustomObject]@{
+            Icon        = $statusIcon
+            Id          = $_.Id.Substring(0,6)
+            Description = $_.Description
+            DueDate     = if ($_.DueDate) { Format-TodoDate $_.DueDate } else { "-" } # Assumes Format-TodoDate
+            Priority    = $_.Priority.Substring(0, [Math]::Min($_.Priority.Length, 3))
+            Progress    = $progressDisplay
+            Project     = if ($project.Length -gt 13) { $project.Substring(0,12) + "…" } else { $project }
+            Tags        = ($_.Tags -join ", ").ToString()
+        }
+    }
+    
+    # Define row color condition for overdue/due soon tasks
+    $rowColorCondition = {
+        param($rowItem) # $rowItem here is one of the PSCustomObjects from $tableData
+        # To use this effectively, the original task object needs to be accessible
+        # or critical status fields need to be part of $rowItem.
+        # This is a simplified example if 'Status' was a direct property of $rowItem:
+        # if ($rowItem.Status -eq "Overdue") { return Get-ThemeProperty "DataTable.Highlight.Overdue.FG" }
+        # if ($rowItem.Status -eq "Due Today") { return Get-ThemeProperty "DataTable.Highlight.DueSoon.FG" }
+        # For a more robust solution, Format-TableUnicode might need to accept original items too for conditional logic
+        return $null 
+    }
+
+    Format-TableUnicode -Data $tableData -Columns $columns -Title "Task List" -NoHeader:$false -RowColorCondition $rowColorCondition
+}
+
+function Show-TaskItem {
+    # This function was for a more verbose line-by-line display.
+    # Show-TaskListView now uses Format-TableUnicode for a tabular display.
+    # This function can be kept for detailed views or removed if Show-TaskListView is sufficient.
+    # For now, let's comment it out as Show-TaskListView provides the primary list.
+    # If needed for a "detail" view of a single task, it can be repurposed.
+    <#
+    param($Task)
+   
+    $icon = if ($Task.Completed) { "✅" } else { "⬜" }
+    $priorityInfo = Get-PriorityInfo $Task.Priority # From core-data.ps1
+    $id = $Task.Id.Substring(0, 6)
+    $status = Get-TaskStatus $Task # From core-data.ps1
+   
+    # Main line
+    Write-Host "  $icon [$id] " -NoNewline
+    Write-Host $priorityInfo.Icon -NoNewline; Write-Host " " -NoNewline
+   
+    if ($Task.Completed) {
+        Write-Host (Apply-PSStyle -Text $Task.Description -FG (Get-ThemeProperty "DataTable.Highlight.Completed.FG"))
+    } else {
+        $statusColor = Get-ThemeProperty "Palette.PrimaryFG" # Default
+        switch ($status) {
+            "Overdue"     { $statusColor = Get-ThemeProperty "Palette.ErrorFG" }
+            "Due Today"   { $statusColor = Get-ThemeProperty "Palette.WarningFG" }
+            "Due Soon"    { $statusColor = Get-ThemeProperty "Palette.InfoFG" }
+            "In Progress" { $statusColor = Get-ThemeProperty "Palette.AccentFG" }
+        }
+        Write-Host (Apply-PSStyle -Text $Task.Description -FG $statusColor)
+    }
+   
+    # Details line
+    Write-Host "      " -NoNewline
+    # ... (rest of the detailed output logic from Pmc Mod Base.txt if desired for a non-table view) ...
+    Write-Host # Ensure newline
+    #>
+}
+
+function Show-KanbanView {
+    param($Tasks) # $Tasks are the filtered & sorted task objects
+    Write-Header "Kanban Board"
+
+    $todoTasks = $Tasks | Where-Object { -not $_.Completed -and ($_.Progress -eq 0 -or -not $_.Progress) }
+    $inProgressTasks = $Tasks | Where-Object { -not $_.Completed -and $_.Progress -gt 0 -and $_.Progress -lt 100 }
+    $doneTasks = $Tasks | Where-Object { $_.Completed -or $_.Progress -eq 100 }
+
+    $columnsConfig = @(
+        @{ Title="To Do"; Items = $todoTasks; Color = (Get-ThemeProperty "Palette.ErrorFG")}
+        @{ Title="In Progress"; Items = $inProgressTasks; Color = (Get-ThemeProperty "Palette.WarningFG")}
+        @{ Title="Done"; Items = $doneTasks; Color = (Get-ThemeProperty "Palette.SuccessFG")}
+    )
+
+    # Determine max items in any column for balanced display height
+    $maxItems = 0
+    foreach ($colDef in $columnsConfig) {
+        if ($colDef.Items.Count -gt $maxItems) { $maxItems = $colDef.Items.Count }
+    }
+    if ($maxItems -eq 0) { Write-Host "No tasks to display in Kanban." -ForegroundColor Gray; return }
+    $maxItems = [Math]::Min($maxItems, 10) # Limit rows to keep it manageable
+
+    $colWidth = 25 # Approximate width for each Kanban column content
+
+    # Draw Header
+    $headerLine = ""
+    $separatorLine = $Global:borderStyles.Single.TLeft
+    foreach ($colDef in $columnsConfig) {
+        $headerText = (" " + $colDef.Title + " ($($colDef.Items.Count))").PadRight($colWidth)
+        $headerLine += Apply-PSStyle -Text $headerText -FG $colDef.Color -Bold
+        $headerLine += $Global:borderStyles.Single.Vertical
+        $separatorLine += ($Global:borderStyles.Single.Horizontal * $colWidth) + $Global:borderStyles.Single.Cross
+    }
+    $headerLine = $Global:borderStyles.Single.Vertical + $headerLine.Substring(0, $headerLine.Length-1) + $Global:borderStyles.Single.Vertical
+    $separatorLine = $separatorLine.Substring(0, $separatorLine.Length-1) + $Global:borderStyles.Single.TRight
+    
+    Write-Host $Global:borderStyles.Single.TopLeft + ($Global:borderStyles.Single.Horizontal * (($colWidth + 1) * $columnsConfig.Count -1)) + $Global:borderStyles.Single.TopRight
+    Write-Host $headerLine
+    Write-Host $separatorLine
+
+    # Draw Items
+    for ($i = 0; $i -lt $maxItems; $i++) {
+        $rowLine = $Global:borderStyles.Single.Vertical
+        foreach ($colDef in $columnsConfig) {
+            $cellText = " ".PadRight($colWidth) # Empty cell
+            if ($i -lt $colDef.Items.Count) {
+                $task = $colDef.Items[$i]
+                $taskDesc = "$($task.Id.Substring(0,4)) $($task.Description)"
+                if ($taskDesc.Length -gt ($colWidth-1)) { $taskDesc = $taskDesc.Substring(0, $colWidth-2) + "…" }
+                $cellText = (" " + $taskDesc).PadRight($colWidth)
+            }
+            $rowLine += $cellText + $Global:borderStyles.Single.Vertical
+        }
+        Write-Host $rowLine
+    }
+    
+    # Draw Footer
+    $footerLine = $Global:borderStyles.Single.BottomLeft
+    foreach ($colDef in $columnsConfig) {
+         $footerLine += ($Global:borderStyles.Single.Horizontal * $colWidth) + $Global:borderStyles.Single.TBottom
+    }
+    $footerLine = $footerLine.Substring(0, $footerLine.Length-1) + $Global:borderStyles.Single.BottomRight
+    Write-Host $footerLine
+}
+
+function Show-TimelineView {
+    param($Tasks) # Filtered and sorted tasks
+    Write-Header "Timeline View"
+
+    $today = [datetime]::Today.Date
+    $timelineGroups = @(
+        @{ Name = "Overdue"; Color = (Get-ThemeProperty "Palette.ErrorFG"); Condition = { param($t) $t.DueDate -and ([datetime]::Parse($t.DueDate).Date -lt $today) -and -not $t.Completed } }
+        @{ Name = "Today"; Color = (Get-ThemeProperty "Palette.WarningFG"); Condition = { param($t) $t.DueDate -and ([datetime]::Parse($t.DueDate).Date -eq $today) -and -not $t.Completed } }
+        @{ Name = "Tomorrow"; Color = (Get-ThemeProperty "Palette.InfoFG"); Condition = { param($t) $t.DueDate -and ([datetime]::Parse($t.DueDate).Date -eq $today.AddDays(1)) -and -not $t.Completed } }
+        @{ Name = "This Week (Next 7 Days)"; Color = (Get-ThemeProperty "Palette.AccentFG"); Condition = { param($t) $t.DueDate -and ([datetime]::Parse($t.DueDate).Date -gt $today.AddDays(1)) -and ([datetime]::Parse($t.DueDate).Date -le $today.AddDays(7)) -and -not $t.Completed } }
+        @{ Name = "Next Week (Days 8-14)"; Color = (Get-ThemeProperty "Palette.SubtleFG"); Condition = { param($t) $t.DueDate -and ([datetime]::Parse($t.DueDate).Date -gt $today.AddDays(7)) -and ([datetime]::Parse($t.DueDate).Date -le $today.AddDays(14)) -and -not $t.Completed } }
+        @{ Name = "Later"; Color = (Get-ThemeProperty "Palette.SubtleFG"); Condition = { param($t) $t.DueDate -and ([datetime]::Parse($t.DueDate).Date -gt $today.AddDays(14)) -and -not $t.Completed } }
+        @{ Name = "No Due Date"; Color = (Get-ThemeProperty "Palette.SubtleFG"); Condition = { param($t) -not $t.DueDate -and -not $t.Completed } }
+        @{ Name = "Recently Completed"; Color = (Get-ThemeProperty "DataTable.Highlight.Completed.FG"); Condition = { param($t) $t.Completed -and $t.CompletedDate -and ([datetime]::Parse($t.CompletedDate).Date -ge $today.AddDays(-$script:Data.Settings.ShowCompletedDays)) } }
+    )
+
+    foreach ($group in $timelineGroups) {
+        $groupTasks = $Tasks | Where-Object { & $group.Condition $_ } | Sort-Object DueDate, Priority
+        if ($groupTasks.Count -gt 0) {
+            Write-Host "`n🗓️ $($group.Name) ($($groupTasks.Count))" -ForegroundColor $group.Color
+            foreach ($task in $groupTasks) {
+                $priorityInfo = Get-PriorityInfo $task.Priority
+                $project = if ($task.ProjectKey) { (Get-ProjectOrTemplate $task.ProjectKey).Name } else { "" }
+                $dueDateInfo = if ($task.DueDate) { (Format-TodoDate $task.DueDate) } else { "" }
+                
+                $taskLine = "  $($priorityInfo.Icon) $($task.Description)"
+                if ($project) { $taskLine += " `o`($($project)`o`)" } # Small o for project marker
+                if ($dueDateInfo -and $group.Name -ne "No Due Date") { $taskLine += " `o`($($dueDateInfo)`o`)" }
+                if ($task.Completed) { $taskLine = Apply-PSStyle -Text $taskLine -FG (Get-ThemeProperty "DataTable.Highlight.Completed.FG")}
+                
+                Write-Host $taskLine
+            }
+        }
+    }
+}
+
+function Show-ProjectTaskView {
+    param($Tasks) # Filtered and sorted tasks
+    Write-Header "Tasks Grouped by Project"
+
+    $tasksByProject = $Tasks | Group-Object ProjectKey | Sort-Object Name
+
+    foreach ($projectGroup in $tasksByProject) {
+        $projectKey = $projectGroup.Name
+        $project = if ($projectKey) { Get-ProjectOrTemplate $projectKey } else { $null }
+        $projectName = if ($project) { $project.Name } else { "Tasks without a Project" }
+        
+        $activeCount = ($projectGroup.Group | Where-Object { -not $_.Completed }).Count
+        $completedCount = ($projectGroup.Group | Where-Object { $_.Completed }).Count
+        $totalInGroup = $projectGroup.Group.Count
+
+        Write-Host "`n📁 $($projectName) " -NoNewline -ForegroundColor (Get-ThemeProperty "Palette.AccentFG")
+        Write-Host "($activeCount active / $completedCount completed of $totalInGroup)" -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+
+        if ($totalInGroup -gt 0) {
+            $projectProgress = [Math]::Round(($completedCount / $totalInGroup) * 100, 0)
+            Draw-ProgressBar -Percent $projectProgress -Width 30 -ForegroundColor (Get-ThemeProperty "Palette.SuccessFG") -BackgroundColor (Get-ThemeProperty "Palette.SubtleFG")
+            Write-Host # Newline after progress bar
+        }
+
+        # Display tasks for this project using the standard list view format
+        # This requires $projectGroup.Group to be passed to a table formatter
+        $projectTaskData = $projectGroup.Group | ForEach-Object {
+            $priorityInfo = Get-PriorityInfo $_.Priority
+            $statusIcon = if ($_.Completed) { Apply-PSStyle -Text "✅" -FG (Get-ThemeProperty "DataTable.Highlight.Completed.FG") } else { $priorityInfo.Icon }
+            [PSCustomObject]@{
+                Icon        = $statusIcon
+                Id          = $_.Id.Substring(0,6)
+                Description = $_.Description
+                DueDate     = if ($_.DueDate) { Format-TodoDate $_.DueDate } else { "-" }
+                Priority    = $_.Priority.Substring(0, [Math]::Min($_.Priority.Length, 3))
+                Progress    = if ($_.Completed) { "Done" } elseif ($_.Progress -gt 0) { "$($_.Progress)%" } else { "-" }
+                Tags        = ($_.Tags -join ", ").ToString()
+            }
+        }
+        $columns = @(
+            @{Name="Icon"; Title="S"; Width=3}
+            @{Name="Id"; Title="ID"; Width=7}
+            @{Name="Description"; Title="Description"; Width=50; Wrap=$true}
+            @{Name="DueDate"; Title="Due"; Width=12}
+            @{Name="Priority"; Title="Pri"; Width=6}
+            @{Name="Progress"; Title="Prog"; Width=5; Align="Right"}
+            @{Name="Tags"; Title="Tags"; Width=20}
+        )
+        Format-TableUnicode -Data $projectTaskData -Columns $columns -NoHeader # No sub-headers for each project
+    }
+}
+
+function Show-TaskStatistics {
+    param($TasksToConsider) # Pass the set of tasks being currently viewed
+   
+    if (-not $TasksToConsider) { $TasksToConsider = @() } # Handle null input
+
+    $stats = @{
+        Total = $TasksToConsider.Count
+        Completed = ($TasksToConsider | Where-Object { $_.Completed }).Count
+        Critical = ($TasksToConsider | Where-Object { $_.Priority -eq "Critical" -and -not $_.Completed }).Count
+        High = ($TasksToConsider | Where-Object { $_.Priority -eq "High" -and -not $_.Completed }).Count
+        Medium = ($TasksToConsider | Where-Object { $_.Priority -eq "Medium" -and -not $_.Completed }).Count
+        Low = ($TasksToConsider | Where-Object { $_.Priority -eq "Low" -and -not $_.Completed }).Count
+        Overdue = ($TasksToConsider | Where-Object {
+            $_.DueDate -and ([datetime]::Parse($_.DueDate).Date -lt [datetime]::Today.Date) -and -not $_.Completed
+        }).Count
+        DueToday = ($TasksToConsider | Where-Object {
+            $_.DueDate -and ([datetime]::Parse($_.DueDate).Date -eq [datetime]::Today.Date) -and -not $_.Completed
+        }).Count
+        InProgress = ($TasksToConsider | Where-Object { $_.Progress -gt 0 -and $_.Progress -lt 100 -and -not $_.Completed }).Count
+    }
+   
+    Write-Host "`n" + ("-" * ($Host.UI.RawUI.WindowSize.Width -2)) -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+    $statLine = "  📊 Total: $($stats.Total) | ✅ Done: $($stats.Completed) | "
+    if ($stats.Overdue -gt 0) { $statLine += Apply-PSStyle -Text "⚠️ Overdue: $($stats.Overdue) | " -FG (Get-ThemeProperty "Palette.ErrorFG")}
+    if ($stats.DueToday -gt 0) { $statLine += Apply-PSStyle -Text "📅 Due Today: $($stats.DueToday) | " -FG (Get-ThemeProperty "Palette.WarningFG")}
+    if ($stats.InProgress -gt 0) { $statLine += Apply-PSStyle -Text "🔄 In Prog: $($stats.InProgress) | " -FG (Get-ThemeProperty "Palette.AccentFG")}
+    $statLine += "🔥 Crit: $($stats.Critical) | 🔴 High: $($stats.High) | 🟡 Med: $($stats.Medium) | 🟢 Low: $($stats.Low)"
+    Write-Host $statLine
+    Write-Host ("-" * ($Host.UI.RawUI.WindowSize.Width -2)) -ForegroundColor (Get-ThemeProperty "Palette.SubtleFG")
+}
+
+function Show-ProjectsAndTemplates {
+    # This UI function is now primarily for display. Core logic like Get-ProjectOrTemplate is in core-data.
+    param([switch]$Simple) # $Simple switch might control verbosity or if header is shown
+   
+    if (-not $Simple) {
+        Write-Header "Projects & Templates"
+    }
+    
+    $activeProjects = @()
+    $otherProjects = @()
+    $templates = @()
+
+    if ($script:Data -and $script:Data.Projects) {
+        $allProjects = $script:Data.Projects.GetEnumerator() | Sort-Object { $_.Value.Name }
+        $activeProjects = $allProjects | Where-Object { $_.Value.Status -eq "Active" }
+        $otherProjects = $allProjects | Where-Object { $_.Value.Status -ne "Active" } | Sort-Object { $_.Value.Status }
+    }
+    if ($script:Data -and $script:Data.Settings -and $script:Data.Settings.TimeTrackerTemplates) {
+        $templates = $script:Data.Settings.TimeTrackerTemplates.GetEnumerator() | Sort-Object { $_.Value.Name }
+    }
+
+    # Using Format-TableUnicode for a cleaner layout
+    $projectDataToDisplay = @()
+
+    # Active Projects
+    if ($activeProjects.Count -gt 0) {
+        $projectDataToDisplay += [PSCustomObject]@{ Section = "Active Projects"; Name = ""; Key = ""; Client = ""; Tasks = ""; Rate = "" } # Section Header
+        foreach ($proj in $activeProjects) {
+            $taskCount = if ($proj.Value.ActiveTasks) { $proj.Value.ActiveTasks } else { 0 }
+            $taskDisplay = if ($taskCount -gt 0) { "$taskCount task$(if ($taskCount -ne 1) {'s'})" } else { "" }
+            $rateDisplay = if ($proj.Value.BillingType -eq "Billable") { "`$$($proj.Value.Rate)/hr" } else { "Non-Bill" }
+            $projectDataToDisplay += [PSCustomObject]@{ 
+                Section = ""; 
+                Name = $proj.Value.Name; 
+                Key = "[$($proj.Key)]"; 
+                Client = $proj.Value.Client;
+                Tasks = $taskDisplay;
+                Rate = $rateDisplay 
+            }
+        }
+    } else {
+         $projectDataToDisplay += [PSCustomObject]@{ Section = "Active Projects"; Name = "(None)"; Key = ""; Client = ""; Tasks = ""; Rate = "" }
+    }
+    $projectDataToDisplay += [PSCustomObject]@{ Section = ""; Name = ""; Key = ""; Client = ""; Tasks = ""; Rate = "" } # Spacer
+
+    # Other Projects
+    if ($otherProjects.Count -gt 0) {
+        $projectDataToDisplay += [PSCustomObject]@{ Section = "Other Projects"; Name = ""; Key = ""; Client = ""; Tasks = ""; Rate = "" } # Section Header
+        foreach ($proj in $otherProjects) {
+            $projectDataToDisplay += [PSCustomObject]@{ 
+                Section = "  ($($proj.Value.Status))"; # Indent status for visual grouping
+                Name = $proj.Value.Name; 
+                Key = "[$($proj.Key)]"; 
+                Client = $proj.Value.Client;
+                Tasks = ""; # No task count for non-active typically
+                Rate = ""
+            }
+        }
+    }
+    $projectDataToDisplay += [PSCustomObject]@{ Section = ""; Name = ""; Key = ""; Client = ""; Tasks = ""; Rate = "" } # Spacer
+    
+    # Templates
+    if ($templates.Count -gt 0) {
+        $projectDataToDisplay += [PSCustomObject]@{ Section = "Templates"; Name = ""; Key = ""; Client = ""; Tasks = ""; Rate = "" } # Section Header
+        foreach ($tmpl in $templates) {
+            $projectDataToDisplay += [PSCustomObject]@{ 
+                Section = ""; 
+                Name = $tmpl.Value.Name; 
+                Key = "[$($tmpl.Key)]"; 
+                Client = "Internal";
+                Tasks = "";
+                Rate = ""
+            }
+        }
+    }
+    
+    $columns = @(
+        @{Name="Section"; Title=""; Width=18},
+        @{Name="Key"; Title="Key"; Width=12},
+        @{Name="Name"; Title="Name"; Width=30},
+        @{Name="Client"; Title="Client"; Width=20},
+        @{Name="Tasks"; Title="Active Tasks"; Width=15},
+        @{Name="Rate"; Title="Rate/Type"; Width=12}
+    )
+
+    $rowColorCondition = {
+        param($row)
+        if ($row.Section -eq "Active Projects") { return Get-ThemeProperty "Palette.SuccessFG" } # Make section headers stand out
+        if ($row.Section -eq "Other Projects") { return Get-ThemeProperty "Palette.WarningFG" }
+        if ($row.Section -eq "Templates") { return Get-ThemeProperty "Palette.InfoFG" }
+        if ($row.Key -match "\[ADM\]|\[MTG\]|\[TRN\]|\[BRK\]") { return Get-ThemeProperty "Palette.InfoFG" } # Template keys
+        if ($row.Section -match "\(.*\)") { return Get-ThemeProperty "Palette.SubtleFG" } # Status like (On Hold)
+        if ($row.Rate -match "Non-Bill") { return Get-ThemeProperty "Palette.SubtleFG" }
+        return $null
+    }
+    
+    Format-TableUnicode -Data $projectDataToDisplay -Columns $columns -NoHeader -BorderStyle "None" -RowColorCondition $rowColorCondition
+
+}
+
+
+#endregion
